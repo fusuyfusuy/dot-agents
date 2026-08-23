@@ -1,0 +1,15 @@
+[Unit]
+Description=Antigravity Local OpenAI Proxy Bridge for Pi and Coding Agents
+After=network.target
+
+[Service]
+Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/usr/bin/python3 %h/projects/fusuyfusuy/agents-config/tui-agent-settings/antigravity-cli/agy-proxy.py
+Restart=always
+RestartSec=3s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

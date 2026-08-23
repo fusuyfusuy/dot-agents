@@ -1,0 +1,23 @@
+{
+  "allowNonWorkspaceAccess": true,
+  "enableTelemetry": false,
+  "model": "Gemini 3.7 Flash (Medium)",
+  "permissions": {
+    "allow": [
+      "command(find)",
+      "command(git status)",
+      "command(ls)",
+      "command(git ls-files)",
+      "command(git show)",
+      "command(bun)",
+      "command(gh)",
+      "command(curl)",
+      "mcp(context7/query-docs)"
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "python3 ~/.antigravity/status.py"
+  },
+  "trustedWorkspaces": []
+}

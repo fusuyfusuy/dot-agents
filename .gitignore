@@ -1,0 +1,30 @@
+# Node & runtime caches
+node_modules/
+__pycache__/
+*.pyc
+*.log
+*.tmp
+*.bak*
+.DS_Store
+
+# Agent runtime state and caches
+*.jsonl
+!skills/**/activity.jsonl
+*.db
+quota-cache.json
+status-state.json
+oauth_creds.json
+trustedFolders.json
+installation_id
+.venv/
+.env
+.env.*
+*.pem
+*.key
+
+# Generated repository maps
+.mimori/repo_map.md
+
+# Pi runtime state
+.pi/
+.pi-glla/
