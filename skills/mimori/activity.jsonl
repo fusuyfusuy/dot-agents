@@ -1,0 +1,2 @@
+{"timestamp": "2026-08-23T23:13:11.446095+00:00", "action": "feat", "summary": "create global viblog-writer skill in agents-config with symlink and verification pipeline", "files": ["SKILL.md", "templates/post-template.ts", "scripts/verify-viblog.mjs"], "branch": "main", "author": "agent"}
+{"timestamp": "2026-08-23T23:15:12.554494+00:00", "action": "feat", "summary": "add universal cross-repo publishing CLI and protocol to viblog-writer skill", "files": ["scripts/publish-post.mjs", "SKILL.md"], "branch": "main", "author": "agent"}

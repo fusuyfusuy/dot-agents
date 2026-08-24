@@ -51,5 +51,17 @@ Zero-daemon, stdlib-only project memory and ranked repository symbol mapper:
 
 ---
 
+## 🙏 Acknowledgements & Kudos
+
+This suite and its zero-daemon tooling stand on the shoulders of brilliant ideas from the developer and agentic coding community:
+
+- **Ponytail (`ponytail`)**: Massive kudos for the **"Lazy Senior Dev"** operating philosophy, the YAGNI decision ladder (delete over add, platform over library, 1-liners over abstractions), and the `# ponytail:` debt ledger protocol.
+- **Caveman (`caveman`)**: Special thanks for the **1-line caveman log style** and terse, high-signal communication rules that keep agent memory sharp and fluff-free.
+- **Aider (`aider`) & Paul Gauthier**: Deep gratitude for pioneering the use of **PageRank on AST symbol definition and reference graphs** to generate token-budgeted repository maps.
+- **Pi / Mario**: Kudos for modular agent extension patterns and ultra-fast, zero-overhead CLI workflows.
+- **The Agentic Coding Community**: Thanks to all developers exploring the frontiers of human-agent pair programming and zero-daemon developer tooling.
+
+---
+
 ## 📜 License
 MIT License.

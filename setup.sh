@@ -191,7 +191,8 @@ install_shared() {
         "$SCRIPT_DIR/scripts/llm_benchmark_aggregator.py" \
         "$SCRIPT_DIR/scripts/opencode_cost_benefit_analyzer.py" \
         "$SCRIPT_DIR/scripts/free_model_ranker.py" \
-        "$SCRIPT_DIR/scripts/stealth_model_detector.py"
+        "$SCRIPT_DIR/scripts/stealth_model_detector.py" \
+        "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs"
 
     mkdir -p "$HOME/.local/bin"
 
@@ -206,6 +207,9 @@ install_shared() {
     link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/agy-artifacts"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/agy-art"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/art"
+    if [ -f "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs" ]; then
+        link_file "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs" "$HOME/.local/bin/viblog-publish"
+    fi
 
     # Herdr Config
     if [ -d "$HOME/.config/herdr" ] || command -v herdr >/dev/null 2>&1; then

@@ -126,6 +126,7 @@ function findPiRoot(): string | null {
       candidates.push(path.resolve(path.dirname(real), ".."));
       candidates.push(path.resolve(path.dirname(real), "../.."));
     } catch {}
+  }
   try {
     const cp = require("node:child_process") as typeof import("node:child_process");
     const globalRoot = cp.execSync("npm root -g 2>/dev/null || true", { encoding: "utf8" }).trim();
