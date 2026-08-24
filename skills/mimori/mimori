@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -119,6 +120,42 @@ def get_mimori_dir(root: Path) -> Path:
     if (root / ".agents").exists():
         return root / ".agents"
     return root / ".mimori"
+
+
+def ensure_git_repo(root: Path) -> bool:
+    """Initializes a git repo if .git is missing."""
+    if not (root / ".git").exists():
+        try:
+            res = subprocess.run(["git", "init"], cwd=str(root), capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                print(f"Initialized empty Git repository in {root}")
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def get_repo_identifier(root: Path) -> str:
+    """Returns 7-char short commit hash, 'init' for empty repos, or short UUID."""
+    out = run_git(root, "rev-parse", "--short=7", "HEAD", timeout=2)
+    if out and out.strip():
+        return out.strip()
+    if (root / ".git").exists():
+        return "init"
+    return uuid.uuid4().hex[:7]
+
+
+def get_user_temp_dir() -> Path:
+    """Resolves user-isolated temp directory: $XDG_RUNTIME_DIR/mimori or /tmp/mimori-$UID."""
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime and os.path.isdir(xdg_runtime):
+        base = Path(xdg_runtime) / "mimori"
+    else:
+        uid = os.getuid() if hasattr(os, "getuid") else "user"
+        tmp = os.environ.get("TMPDIR", "/tmp")
+        base = Path(tmp) / f"mimori-{uid}"
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return base
 
 
 def run_git(root: Path, *args: str, timeout: int = 5) -> Optional[str]:
@@ -1003,6 +1040,7 @@ def resolve_focus(value: Optional[str]) -> List[str]:
 
 def cmd_init(args: argparse.Namespace) -> int:
     root = find_repo_root()
+    ensure_git_repo(root)
     mimori_dir = get_mimori_dir(root)
     mimori_dir.mkdir(exist_ok=True)
 
@@ -1103,6 +1141,7 @@ def cmd_history(args: argparse.Namespace) -> int:
 
 def cmd_dump(args: argparse.Namespace) -> int:
     root = find_repo_root()
+    ensure_git_repo(root)
     mimori_dir = get_mimori_dir(root)
     total = resolve_budget(getattr(args, "budget", None), DUMP_TOTAL_BUDGET)
     # Prose stores each get a third; the map takes what is left. Scaling with the
@@ -1179,7 +1218,22 @@ def cmd_dump(args: argparse.Namespace) -> int:
     out.append("\n---\n")
     out.extend(tail)
 
-    print("\n".join(out))
+    rendered = "\n".join(out)
+
+    out_target = getattr(args, "file", None)
+    if out_target is not None:
+        if out_target == "" or out_target is True or out_target is None or isinstance(out_target, bool):
+            commit_id = get_repo_identifier(root)
+            dest_file = get_user_temp_dir() / f"ctx-{root.name}-{commit_id}.md"
+        else:
+            dest_file = Path(out_target).resolve()
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+
+        dest_file.write_text(rendered, encoding="utf-8")
+        print(f"Wrote context snapshot to {dest_file}")
+        return 0
+
+    print(rendered)
     return 0
 
 
@@ -1464,6 +1518,52 @@ def _test_misc(root: Path) -> None:
     assert resolve_budget("5000", 24000) == 5000, "raw character counts must resolve"
 
 
+def _test_dump_file_and_git_init(root: Path) -> None:
+    # 1. Non-git directory auto-init test
+    with tempfile.TemporaryDirectory() as raw_dir:
+        raw_root = Path(raw_dir).resolve()
+        assert not (raw_root / ".git").exists(), "fixture must start without .git"
+        assert ensure_git_repo(raw_root) is True, "ensure_git_repo must initialize git repository"
+        assert (raw_root / ".git").exists(), ".git directory must be created"
+        assert get_repo_identifier(raw_root) == "init", "repo with no commits must return 'init'"
+
+    # 2. Repo with commits must return short sha
+    ident = get_repo_identifier(root)
+    assert len(ident) >= 7, f"commit identifier must be short sha or init, got {ident!r}"
+
+    # 3. User temp directory resolution
+    u_tmp = get_user_temp_dir()
+    assert u_tmp.is_dir(), f"get_user_temp_dir must return an existing directory, got {u_tmp}"
+
+    # 4. Dump to default user temp file
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(root)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ret = cmd_dump(argparse.Namespace(budget=None, focus=None, file=""))
+        assert ret == 0, "cmd_dump with file='' must exit 0"
+        output = buf.getvalue()
+        assert "Wrote context snapshot to" in output, f"dump must report written target, got:\n{output}"
+
+        expected_file = u_tmp / f"ctx-{root.name}-{ident}.md"
+        assert expected_file.is_file(), f"expected dump file {expected_file} must exist"
+        content = expected_file.read_text(encoding="utf-8")
+        assert f"# Agent Context Snapshot ({root.name})" in content, "dump file must contain snapshot header"
+        assert "## Structure & Symbol Map" in content, "dump file must contain symbol map"
+
+        # 5. Dump to custom path
+        custom_target = root / "custom_ctx.md"
+        buf_custom = io.StringIO()
+        with contextlib.redirect_stdout(buf_custom):
+            ret_custom = cmd_dump(argparse.Namespace(budget=None, focus=None, file=str(custom_target)))
+        assert ret_custom == 0, "cmd_dump with custom path must exit 0"
+        assert custom_target.is_file(), "custom target file must exist"
+        assert f"Wrote context snapshot to {custom_target}" in buf_custom.getvalue()
+    finally:
+        os.chdir(old_cwd)
+
+
 def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir).resolve()
@@ -1476,6 +1576,7 @@ def run_self_test() -> int:
         _test_misc(root)
         _test_git_integration(root)
         _test_dump_is_live(root)
+        _test_dump_file_and_git_init(root)
     print("Self-test passed successfully.")
     return 0
 
@@ -1503,6 +1604,13 @@ def main() -> int:
     dump_parser.add_argument("--focus", default=None,
                              help="Comma-separated files/substrings to pull into full detail "
                                   "(with their import-graph neighbors); env: MIMORI_FOCUS.")
+    dump_parser.add_argument(
+        "--file", "-o", "--out",
+        nargs="?",
+        const="",
+        default=None,
+        help="Write snapshot to user temp file ($XDG_RUNTIME_DIR/mimori/ctx-<repo>-<commit>.md) or custom path",
+    )
 
     log_parser = subparsers.add_parser("log", help="Append an entry to .mimori/activity.jsonl")
     log_parser.add_argument("--action", required=True, help="Short action name (e.g. 'feature-auth')")

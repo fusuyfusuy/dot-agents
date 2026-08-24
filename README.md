@@ -24,8 +24,8 @@ cd ~/.agents-suite
 
 ### 1. `mimori` — Zero-Daemon Project Context & AST Symbol Map
 Zero-daemon, stdlib-only project memory and ranked repository symbol mapper:
-- `mimori init`: Initialize project memory (`memory.md`, `decisions.md`, `activity.jsonl`).
-- `mimori dump`: Single-turn context snapshot (branch, uncommitted changes, ADRs, ranked symbol map).
+- `mimori init`: Initialize project memory (`memory.md`, `decisions.md`, `activity.jsonl`) with auto `git init`.
+- `mimori dump --file`: Fast snapshot written to user-isolated temp (`$XDG_RUNTIME_DIR/mimori/ctx-<repo>-<commit>.md`).
 - `mimori map`: Live PageRank + AST import-graph repository symbol orientation.
 - `mimori log`: Machine-action telemetry recording.
 

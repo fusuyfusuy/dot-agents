@@ -33,11 +33,11 @@
 ## 🚀 Quickstart
 
 ```bash
-# Scaffold .mimori/ in the current repository
+# Scaffold .mimori/ in the current repository (auto-inits git if missing)
 mimori init
 
-# Fast orientation dump for LLM context
-mimori dump > /tmp/ctx.md
+# Fast orientation snapshot written to user-isolated temp ($XDG_RUNTIME_DIR/mimori/ctx-<repo>-<commit>.md)
+mimori dump --file
 
 # Generate or refresh repository symbol map
 mimori map

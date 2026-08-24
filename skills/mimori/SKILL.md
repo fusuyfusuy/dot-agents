@@ -9,12 +9,12 @@ description: Zero-daemon project memory, structural symbol mapping, and activity
 
 ## 1. Fast Warmup / Startup
 
-Run this first, before any broad grepping or directory crawling (pipe to file to prevent runner output buffer truncation):
+Run this first, before any broad grepping or directory crawling:
 
 ```bash
-mimori dump > /tmp/ctx.md
+mimori dump --file
 ```
-Then view `/tmp/ctx.md`.
+Then view the printed file path (e.g. `/run/user/1000/mimori/ctx-<repo>-<commit>.md`). If the workspace is not yet a git repository, `mimori` will automatically initialize one. Output files are isolated to the current user's runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`) and tagged by repository name and short commit ID so parallel agent sessions never clash.
 
 One call returns five things: **working state** (branch, uncommitted files, recent commits), **project memory**, **architecture decisions**, a **ranked symbol map**, and **recent activity**.
 

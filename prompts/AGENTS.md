@@ -29,7 +29,7 @@ For multi-file or non-trivial logic:
 
 ## Project Context & Memory (mimori)
 
-- **Session Start / Warmup**: Pipe `mimori dump > /tmp/ctx.md` & view file (live PageRank symbol map + memory + ADRs). For full uncapped map: `mimori map --stdout`. Never read `.mimori/repo_map.md` directly.
+- **Session Start / Warmup**: Run `mimori dump --file` & view output file (live PageRank symbol map + memory + ADRs in user-isolated temp). For full uncapped map: `mimori map --stdout`. Never read `.mimori/repo_map.md` directly.
 - **Task Completion**: Log with `mimori log --action <act> --summary <1-line-caveman> --files <f1,f2>`. Update `.mimori/memory.md` (invariants/gotchas) & `.mimori/decisions.md` (ADRs).
 - **Resume**: Check `git status` + `mimori history --limit 5`.
 
