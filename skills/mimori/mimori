@@ -2124,6 +2124,261 @@ def cmd_idea(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# ponytail debt scanner & sync
+# --------------------------------------------------------------------------
+
+PROSE_DATA_EXTS = {
+    ".md", ".mdx", ".txt", ".rst", ".adoc", ".json", ".jsonl",
+    ".csv", ".tsv", ".lock", ".svg", ".png", ".jpg", ".jpeg",
+    ".gif", ".ico", ".pdf", ".zip", ".tar", ".gz"
+}
+
+RE_STRICT_PONYTAIL = re.compile(r"""^[ \t]*(?:#|//|/\*|<!--|\*)[ \t]*ponytail:[ \t]*(.*)""", re.I)
+RE_LOOSE_PONYTAIL = re.compile(r"""\bponytail:[ \t]*(.*)""", re.I)
+RE_COMMENT_LINE = re.compile(r"^[ \t]*(?:#|//|/\*|\*|<!--|\"\"\"|''')[ \t]*(.*)")
+
+
+class DebtItem:
+    """Represents one in-code ponytail debt marker."""
+
+    def __init__(self, file: str, lineno: int, raw_text: str, what: str, ceiling: str, trigger: str, has_trigger: bool):
+        self.file = file
+        self.lineno = lineno
+        self.raw_text = raw_text
+        self.what = what
+        self.ceiling = ceiling
+        self.trigger = trigger
+        self.has_trigger = has_trigger
+        self.duplicates: List[str] = []
+
+    @property
+    def location(self) -> str:
+        return f"{self.file}:{self.lineno}"
+
+    def format_line(self) -> str:
+        dup_tag = f" [duplicate x{len(self.duplicates) + 1}]" if self.duplicates else ""
+        trig_tag = "" if self.has_trigger else " [no-trigger]"
+        return f"{self.location}: {self.what} <- {self.ceiling} -> {self.trigger or 'unspecified'}{trig_tag}{dup_tag}"
+
+
+def _has_valid_trigger(trigger_text: str) -> bool:
+    """Evaluate if trigger names a concrete condition, threshold, dependency, or owner."""
+    t = trigger_text.strip().lower()
+    if not t or t in ("deferred", "todo", "later", "fix later", "eventually", "tbd", "none", "unknown"):
+        return False
+    trigger_words = ("when", "if", "after", "once", "supports", "threshold", "until", "owner", "dep", "requires", "blocked", "target", ">", "<", ">=", "<=", "@")
+    if any(w in t for w in trigger_words):
+        return True
+    if any(ch.isdigit() for ch in t):
+        return True
+    return len(t) >= 12
+
+
+def scan_ponytail_debt(root: Path, files: Optional[List[str]] = None) -> List[DebtItem]:
+    """Scan workspace for ponytail: deferral comments with 2-pass analysis and multi-line context."""
+    if files is None:
+        files = list_files(root)
+
+    items: List[DebtItem] = []
+    seen_locations: Set[Tuple[str, int]] = set()
+
+    for rel in files:
+        full = root / rel
+        ext = Path(rel).suffix.lower()
+        try:
+            content = full.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            loc = (rel, i + 1)
+            if loc in seen_locations:
+                continue
+
+            m_strict = RE_STRICT_PONYTAIL.match(line)
+            m_loose = RE_LOOSE_PONYTAIL.search(line) if (ext not in PROSE_DATA_EXTS) else None
+
+            if not m_strict:
+                if not m_loose:
+                    continue
+                s_line = line.strip()
+                if s_line.startswith(('"', "'", 'f"', "f'", 'r"', "r'", 'b"', "b'", "RE_", "const ", "let ", "var ", "assert ", "print(", "help=", "description=")):
+                    continue
+                if "re.compile" in line or ("_test" in rel and rel != "debt_test"):
+                    continue
+                prefix = line[:m_loose.start()]
+                if not any(marker in prefix for marker in ("#", "//", "/*", "*", "<!--")):
+                    continue
+
+            seen_locations.add(loc)
+            first_match_text = (m_strict.group(1) if m_strict else m_loose.group(1)).strip()
+
+            comment_parts = [first_match_text]
+            for j in range(i + 1, min(len(lines), i + 8)):
+                next_line = lines[j]
+                if not next_line.strip():
+                    break
+                m_next_comment = RE_COMMENT_LINE.match(next_line)
+                if not m_next_comment:
+                    break
+                if "ponytail:" in next_line.lower():
+                    break
+                comment_parts.append(m_next_comment.group(1).strip())
+
+            full_comment = " ".join(p for p in comment_parts if p).strip()
+            full_comment = re.sub(r'(\*/|-->|"""|\'\'\')\s*$', '', full_comment).strip()
+
+            what, ceiling, trigger = "", "", ""
+            if "<-" in full_comment and "->" in full_comment:
+                p1 = full_comment.split("<-", 1)
+                what = p1[0].strip()
+                p2 = p1[1].split("->", 1)
+                ceiling = p2[0].strip()
+                trigger = p2[1].strip()
+            elif "ceiling:" in full_comment.lower() and "upgrade" in full_comment.lower():
+                m_c = re.search(r'ceiling:\s*([^,;.]+)', full_comment, re.I)
+                m_u = re.search(r'upgrade(?: path)?:\s*([^,;.]+)', full_comment, re.I)
+                ceiling = m_c.group(1).strip() if m_c else ""
+                trigger = m_u.group(1).strip() if m_u else ""
+                what = full_comment.split("ceiling:")[0].strip().rstrip(",;")
+            elif "," in full_comment:
+                parts = full_comment.split(",", 1)
+                ceiling = parts[0].strip()
+                trigger = parts[1].strip()
+                what = ceiling
+            else:
+                what = full_comment
+                ceiling = full_comment
+                trigger = ""
+
+            has_trig = _has_valid_trigger(trigger)
+            items.append(DebtItem(rel, i + 1, full_comment, what, ceiling, trigger, has_trig))
+
+    key_to_items: Dict[str, List[DebtItem]] = {}
+    for item in items:
+        norm_key = re.sub(r'[^a-zA-Z0-9]', '', item.what.lower())
+        if norm_key:
+            key_to_items.setdefault(norm_key, []).append(item)
+
+    for group in key_to_items.values():
+        if len(group) > 1:
+            files_in_group = list({it.file for it in group})
+            if len(files_in_group) > 1:
+                for it in group:
+                    it.duplicates = [f for f in files_in_group if f != it.file]
+
+    return items
+
+
+def cmd_debt(args: argparse.Namespace) -> int:
+    root = find_repo_root()
+    action = getattr(args, "action", "list") or "list"
+    plain = getattr(args, "plain", False) or not sys.stdout.isatty()
+    use_color = not plain
+
+    if action == "list":
+        items = scan_ponytail_debt(root)
+        if not items:
+            print("No ponytail: debt. Clean ledger.")
+            return 0
+
+        bold = "\033[1m" if use_color else ""
+        reset = "\033[0m" if use_color else ""
+        yellow = "\033[33m" if use_color else ""
+        red = "\033[31m" if use_color else ""
+        cyan = "\033[36m" if use_color else ""
+        dim = "\033[2m" if use_color else ""
+
+        print(f"{bold}# Ponytail Debt Ledger ({len(items)} markers){reset}\n")
+        no_trig_count = 0
+        dup_count = 0
+
+        for it in items:
+            loc = f"{cyan}{it.location}{reset}"
+            what_str = f"{bold}{it.what}{reset}"
+            ceiling_str = f"{dim}ceiling:{reset} {it.ceiling}" if it.ceiling else ""
+            trig_str = f"{dim}upgrade:{reset} {it.trigger}" if it.trigger else ""
+            tags = []
+            if not it.has_trigger:
+                tags.append(f"{red}[no-trigger]{reset}")
+                no_trig_count += 1
+            if it.duplicates:
+                tags.append(f"{yellow}[duplicate x{len(it.duplicates) + 1}]{reset}")
+                dup_count += 1
+            tag_str = " " + " ".join(tags) if tags else ""
+
+            print(f"- {loc}: {what_str}{tag_str}")
+            if ceiling_str or trig_str:
+                details = " · ".join(d for d in (ceiling_str, trig_str) if d)
+                print(f"    {details}")
+
+        print(f"\n{dim}{len(items)} markers, {no_trig_count} no-trigger, {dup_count} duplicated.{reset}")
+        return 0
+
+    elif action == "check":
+        items = scan_ponytail_debt(root)
+        errors: List[str] = []
+        for it in items:
+            if not it.has_trigger:
+                errors.append(f"{it.location}: Missing concrete upgrade trigger ({it.trigger!r})")
+        if errors:
+            print(f"Error: {len(errors)} ponytail: debt marker(s) failed check:")
+            for err in errors:
+                print(f"  - {err}")
+            return 1
+        print(f"All {len(items)} ponytail: debt markers verified with valid triggers.")
+        return 0
+
+    elif action == "sync":
+        mimori_dir = get_mimori_dir(root)
+        mem_file = mimori_dir / "memory.md"
+        if not mem_file.is_file():
+            print("Error: .mimori/memory.md not found. Run 'mimori init' first.")
+            return 1
+
+        mem_text = mem_file.read_text(encoding="utf-8", errors="ignore")
+        items = scan_ponytail_debt(root)
+
+        lines = mem_text.splitlines()
+        debt_start = -1
+        debt_end = len(lines)
+
+        for idx, line in enumerate(lines):
+            if re.match(r"^##\s+KNOWN\s+DEBT", line, re.I):
+                debt_start = idx
+            elif debt_start != -1 and re.match(r"^##\s+", line):
+                debt_end = idx
+                break
+
+        manual_entries: List[str] = []
+        if debt_start != -1:
+            for l in lines[debt_start + 1:debt_end]:
+                l_strip = l.strip()
+                if l_strip.startswith("- accepted") or l_strip.startswith("* accepted"):
+                    manual_entries.append(l_strip)
+
+        new_debt_lines = ["## KNOWN DEBT", ""]
+        new_debt_lines.extend(manual_entries)
+        for it in items:
+            new_debt_lines.append(f"- {it.file}:{it.lineno}: {it.what} <- {it.ceiling} -> {it.trigger or 'unspecified'}")
+
+        if len(new_debt_lines) > 32:
+            new_debt_lines = new_debt_lines[:32]
+
+        if debt_start != -1:
+            updated_lines = lines[:debt_start] + new_debt_lines + lines[debt_end:]
+        else:
+            updated_lines = lines + ["", "---", ""] + new_debt_lines
+
+        mem_file.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+        print(f"Synchronized {len(items)} ponytail debt markers into .mimori/memory.md (## KNOWN DEBT).")
+        return 0
+
+    return 0
+
+
+# --------------------------------------------------------------------------
 # self-test
 # --------------------------------------------------------------------------
 
@@ -2677,6 +2932,84 @@ def _test_staleness_scanner(root: Path) -> None:
     assert not any("valid_file.py" in n for n in notices), "Scanner must not flag valid existing files"
 
 
+def _test_debt_system(root: Path) -> None:
+    debt_dir = root / "debt_test"
+    debt_dir.mkdir(exist_ok=True)
+    ensure_git_repo(debt_dir)
+    mimori_dir = debt_dir / ".mimori"
+    mimori_dir.mkdir(exist_ok=True)
+
+    (debt_dir / "service.py").write_text(
+        "# ponytail: pagination limit 50 items\n"
+        "# <- ceiling: max 50 records in memory\n"
+        "# -> upgrade: add cursor pagination when records exceed 10k\n"
+        "def get_items(): return []\n",
+        encoding="utf-8"
+    )
+
+    (debt_dir / "client.ts").write_text(
+        "// ponytail: auth token in local storage\n"
+        "// ceiling: unencrypted storage\n"
+        "// upgrade: deferred\n"
+        "export function login() {}\n",
+        encoding="utf-8"
+    )
+
+    (debt_dir / "dup1.go").write_text(
+        "// ponytail: in-memory cache <- 100 entries -> switch to redis when cluster mode enabled\n"
+        "package main\n",
+        encoding="utf-8"
+    )
+    (debt_dir / "dup2.rs").write_text(
+        "// ponytail: in-memory cache <- 100 entries -> switch to redis when cluster mode enabled\n"
+        "fn main() {}\n",
+        encoding="utf-8"
+    )
+
+    (debt_dir / "notes.md").write_text("# Notes\nponytail: should be ignored in prose\n", encoding="utf-8")
+    (debt_dir / "data.json").write_text('{"summary": "ponytail: should be ignored in json"}\n', encoding="utf-8")
+
+    files = list_files(debt_dir)
+    items = scan_ponytail_debt(debt_dir, files)
+
+    assert len(items) == 4, f"Expected 4 debt items, got {len(items)}: {[it.file for it in items]}"
+
+    client_item = next(it for it in items if it.file == "client.ts")
+    assert not client_item.has_trigger, "client.ts marker must be flagged as no-trigger"
+
+    service_item = next(it for it in items if it.file == "service.py")
+    assert service_item.has_trigger, "service.py marker must be flagged as having valid trigger"
+    assert "10k" in service_item.trigger or "records exceed" in service_item.trigger
+
+    dup1_item = next(it for it in items if it.file == "dup1.go")
+    dup2_item = next(it for it in items if it.file == "dup2.rs")
+    assert "dup2.rs" in dup1_item.duplicates, "dup1.go must reference dup2.rs as duplicate"
+    assert "dup1.go" in dup2_item.duplicates, "dup2.rs must reference dup1.go as duplicate"
+
+    (mimori_dir / "memory.md").write_text(
+        "# Project Memory\n\n"
+        "## KNOWN DEBT\n"
+        "- accepted legacy protocol <- compatibility -> keep until v3\n"
+        "- old_file.py:10: old debt <- ceiling -> trigger\n",
+        encoding="utf-8"
+    )
+
+    sync_args = argparse.Namespace(command="debt", action="sync", plain=True)
+    orig_find_repo_root = globals()["find_repo_root"]
+    globals()["find_repo_root"] = lambda: debt_dir
+    try:
+        ret = cmd_debt(sync_args)
+        assert ret == 0, "cmd_debt sync must succeed"
+        new_mem = (mimori_dir / "memory.md").read_text(encoding="utf-8")
+        assert "## KNOWN DEBT" in new_mem
+        assert "accepted legacy protocol" in new_mem, "Manual accepted debt must be preserved"
+        assert "old_file.py" not in new_mem, "Pruned code marker not in codebase must be removed"
+        assert "service.py" in new_mem, "New code marker must be synced into memory.md"
+        assert "client.ts" in new_mem, "Client marker must be synced into memory.md"
+    finally:
+        globals()["find_repo_root"] = orig_find_repo_root
+
+
 def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir).resolve()
@@ -2695,6 +3028,7 @@ def run_self_test() -> int:
         _test_vectorized_pagerank()
         _test_polyglot_graph(root)
         _test_staleness_scanner(root)
+        _test_debt_system(root)
     print("Self-test passed successfully.")
     return 0
 
@@ -2767,6 +3101,10 @@ def main() -> int:
     idea_parser.add_argument("--tag", "-t", action="append", default=[], help="Tag(s) for idea")
     idea_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
 
+    debt_parser = subparsers.add_parser("debt", help="Scan, sync, and validate ponytail: technical debt markers")
+    debt_parser.add_argument("action", nargs="?", default="list", choices=["list", "sync", "check"], help="Action: list, sync with memory.md, or check for CI")
+    debt_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
+
     args = parser.parse_args()
 
     if args.test:
@@ -2786,6 +3124,7 @@ def main() -> int:
         "todo": cmd_todo,
         "task": cmd_todo,
         "idea": cmd_idea,
+        "debt": cmd_debt,
     }
     return handlers[args.command](args)
 

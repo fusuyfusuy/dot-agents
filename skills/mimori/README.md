@@ -33,8 +33,11 @@
 5. **1-Line Caveman Activity Logging (`mimori log`)**:
    - Machine-action telemetry recorded into `.mimori/activity.jsonl` with author metadata, modified files, and concise caveman summaries.
 
-6. **Debt Ledger Integration**:
-   - Tracks open `# ponytail:` deferral comments and technical debt directly in `.mimori/memory.md`.
+6. **Ponytail Technical Debt Scanner & Reconciler (`mimori debt`)**:
+   - Zero-daemon 2-pass scanner for in-code `# ponytail:` / `// ponytail:` deferral comments.
+   - Parses multi-line ceilings and upgrade triggers, flagging `[no-trigger]` and `[duplicate]` issues.
+   - `mimori debt sync`: Synchronizes code markers into `.mimori/memory.md` (`## KNOWN DEBT`), automatically pruning resolved debt while honoring the 30-line cap and preserving manual entries.
+   - `mimori debt check`: CI validation gate (exits 0 if clean, 1 if broken triggers exist).
 
 7. **Self-Cleaning Temp Cache (`mimori clean`)**:
    - Opportunistic in-flight garbage collection on `dump --file`: retains the 2 newest snapshots per repo, auto-expires files older than 72h, and caps total temp files.
@@ -59,6 +62,11 @@ mimori todo done 1                               # Mark task #1 completed ([x])
 # Manage future ideas & proposals
 mimori idea add "Explore distributed AST indexing"
 mimori idea promote 1                            # Move idea #1 into Active Tasks
+
+# Manage & synchronize in-code ponytail debt
+mimori debt                                      # List code-level debt markers
+mimori debt sync                                 # Reconcile markers into memory.md
+mimori debt check                                # CI validation check
 
 # Generate or refresh repository symbol map
 mimori map

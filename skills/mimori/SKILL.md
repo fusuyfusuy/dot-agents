@@ -121,7 +121,24 @@ mimori idea promote 1      # Move idea #1 into Active Tasks
 - `--plain`: Emit clean text without ANSI colors (safe for piping).
 - Substring targeting: `mimori todo done "AST"` resolves fuzzy text matches if unique.
 
-## 5. Log Task Activity & Telemetry
+## 5. Ponytail Technical Debt & Ledger Reconciliation
+
+`mimori debt` scans in-code `# ponytail:` / `// ponytail:` deferral comments and manages the debt ledger:
+
+```bash
+# List all in-code ponytail debt markers with ceilings and upgrade triggers
+mimori debt
+mimori debt list
+
+# Synchronize in-code markers into .mimori/memory.md (## KNOWN DEBT)
+# Automatically prunes resolved markers and respects the 30-line debt cap
+mimori debt sync
+
+# CI Validation Gate: Verify all markers have valid triggers (exit 0 / exit 1)
+mimori debt check
+```
+
+## 6. Log Task Activity & Telemetry
 
 When finishing a task or major milestone, log a **high-level overview** — what changed and why it matters, not a step-by-step of how you did it. One line, caveman style (above), similar in scope to a git commit subject line:
 
@@ -140,7 +157,7 @@ To inspect recent activities across sessions:
 mimori history --limit 5
 ```
 
-## 6. Cache Management & Garbage Collection
+## 7. Cache Management & Garbage Collection
 
 Context snapshots generated via `mimori dump --file` are stored in the user runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`).
 
