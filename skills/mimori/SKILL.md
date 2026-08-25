@@ -16,7 +16,7 @@ mimori dump --file
 ```
 Then view the printed file path (e.g. `/run/user/1000/mimori/ctx-<repo>-<commit>.md`). If the workspace is not yet a git repository, `mimori` will automatically initialize one. Output files are isolated to the current user's runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`) and tagged by repository name and short commit ID so parallel agent sessions never clash.
 
-One call returns five things: **working state** (branch, uncommitted files, recent commits), **project memory**, **architecture decisions**, a **ranked symbol map**, and **recent activity**.
+One call returns six things: **working state** (branch, uncommitted files, recent commits), **project memory**, **architecture decisions**, **tasks & backlog**, a **ranked symbol map**, and **recent activity**.
 
 The map is regenerated live on every call, so it never serves stale cached data. Read it as an *orientation* layer, not an index:
 
@@ -46,6 +46,7 @@ When a budget binds, degradation is by priority and nothing vanishes silently:
 
 - **Memory** keeps invariants and gotchas ahead of status/epics; an oversized top-priority section is truncated rather than dropped.
 - **Decisions** always list **every ADR title**, expanding bodies newest-first. An ADR marked `**Superseded by**: ...` is kept for history but never expanded, so the file can grow without the snapshot growing with it.
+- **Tasks & Backlog** prioritizes In-Progress `[/]` and Active `[ ]` tasks; Future Ideas `[?]` are included up to budget; Completed tasks `[x]` are collapsed to compact count summaries (`_N completed tasks hidden_`) so historical items never displace active context.
 - **Map** collapses lower-ranked files by directory and reports the counts. Files with no parsed symbols are always summarized this way rather than listed individually, even at an unlimited budget — they are grouped, not dropped.
 - **Recent Activity** (the last `mimori log` entries) is capped separately so a verbose logger can't starve the map's share: long summaries and file lists are elided per-entry, and entries are dropped oldest-first if they still don't fit, with a `_N of M entries shown_` note.
 
@@ -65,7 +66,7 @@ Use it on large repos when you already know the area of a task — it is the che
 
 ## 2. Initialize a Project
 
-To set up the `.mimori/` directory structure (`memory.md`, `decisions.md`, `repo_map.md`, `activity.jsonl`) in a new or existing repository:
+To set up the `.mimori/` directory structure (`memory.md`, `decisions.md`, `tasks.md`, `repo_map.md`, `activity.jsonl`) in a new or existing repository:
 
 ```bash
 mimori init
@@ -75,6 +76,7 @@ mimori init
 
 - **`.mimori/memory.md`**: Update when discovering non-obvious domain rules, active epic milestones, or subtle edge-case gotchas.
 - **`.mimori/decisions.md`**: Record new ADRs (*Context*, *Decision*, *Consequences*) when introducing new architectural patterns.
+- **`.mimori/tasks.md`**: Track in-progress tasks, pending todos, and future ideas/backlog.
 
 ### Writing style: caveman
 
@@ -86,7 +88,40 @@ Keep exact, never touch: code, inline code, file paths, commands, URLs, technica
 
 Applies to `.mimori/memory.md`, `.mimori/decisions.md`, `mimori log --summary`. Not README/CLAUDE.md prose or chat replies — those stay full sentences.
 
-## 4. Log Task Activity & Telemetry
+## 4. Todo, Tasklist & Future Ideas Tracking
+
+`mimori` includes zero-daemon CLI task tracking stored in `.mimori/tasks.md`.
+
+### Basic Usage
+
+```bash
+# List all tasks and backlog ideas
+mimori todo
+mimori todo list
+
+# Add new tasks
+mimori todo add "Implement AST cache pruning" --prio high --tag perf
+mimori todo add "Refactor memory loader" --start           # Adds directly to In Progress
+
+# Manage task state transitions
+mimori todo start 1        # Move task #1 to In Progress ([/])
+mimori todo done 1         # Mark task #1 as completed ([x] with date)
+mimori todo reopen 1       # Move back to Active Tasks ([ ])
+mimori todo rm 1           # Delete task #1
+
+# Manage Future Ideas & Backlog
+mimori idea add "Explore quantum symbol indexing" --tag ast
+mimori idea list           # Filter view to ideas only
+mimori idea promote 1      # Move idea #1 into Active Tasks
+```
+
+### Filtering & Options
+- `--status <todo|in_progress|done|idea|all>`: Filter by lifecycle state.
+- `--tag <tag>` / `-t <tag>`: Filter by tag (e.g. `mimori todo --tag perf`).
+- `--plain`: Emit clean text without ANSI colors (safe for piping).
+- Substring targeting: `mimori todo done "AST"` resolves fuzzy text matches if unique.
+
+## 5. Log Task Activity & Telemetry
 
 When finishing a task or major milestone, log a **high-level overview** — what changed and why it matters, not a step-by-step of how you did it. One line, caveman style (above), similar in scope to a git commit subject line:
 
@@ -105,7 +140,7 @@ To inspect recent activities across sessions:
 mimori history --limit 5
 ```
 
-## 5. Cache Management & Garbage Collection
+## 6. Cache Management & Garbage Collection
 
 Context snapshots generated via `mimori dump --file` are stored in the user runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`).
 

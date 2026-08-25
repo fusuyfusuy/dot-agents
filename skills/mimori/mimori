@@ -7,7 +7,9 @@ Zero external dependencies - Python standard library only.
 from __future__ import annotations
 
 import argparse
+import array
 import ast
+import concurrent.futures
 import contextlib
 import datetime
 import io
@@ -18,7 +20,13 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -105,6 +113,19 @@ as an ADR and render as a phantom entry in every dump.
 -->
 """
 
+DEFAULT_TASKS_TEMPLATE = """# Tasks & Backlog
+
+## In Progress
+
+## Active Tasks
+- (Add pending actionable tasks here)
+
+## Future Ideas & Backlog
+- (Add exploratory ideas, architecture proposals, or future concepts here)
+
+## Completed
+"""
+
 
 # --------------------------------------------------------------------------
 # repo root & git
@@ -126,6 +147,15 @@ def get_mimori_dir(root: Path) -> Path:
     if (root / ".agents").exists():
         return root / ".agents"
     return root / ".mimori"
+
+
+def get_tasks_file(root: Path) -> Path:
+    mimori_dir = get_mimori_dir(root)
+    if (mimori_dir / "tasks.md").exists():
+        return mimori_dir / "tasks.md"
+    if (mimori_dir / "todos.md").exists():
+        return mimori_dir / "todos.md"
+    return mimori_dir / "tasks.md"
 
 
 def ensure_git_repo(root: Path) -> bool:
@@ -485,13 +515,13 @@ def parse_python(content: str) -> Tuple[Optional[str], List[Tuple[int, int, str]
 
 GENERIC_PATTERNS = {
     ".js": [r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z0-9_$]+)",
-            r"^export\s+const\s+([A-Za-z0-9_$]+)"],
+            r"^export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)"],
     ".jsx": [r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z0-9_$]+)",
-             r"^export\s+const\s+([A-Za-z0-9_$]+)"],
+             r"^export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)"],
     ".ts": [r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\s+([A-Za-z0-9_$]+)",
-            r"^export\s+const\s+([A-Za-z0-9_$]+)"],
+            r"^export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)"],
     ".tsx": [r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\s+([A-Za-z0-9_$]+)",
-             r"^export\s+const\s+([A-Za-z0-9_$]+)"],
+             r"^export\s+(?:const|let|var)\s+([A-Za-z0-9_$]+)"],
     ".go": [r"^func\s+(?:\([^\)]+\)\s+)?([A-Za-z0-9_]+)", r"^type\s+([A-Za-z0-9_]+)\s+(?:struct|interface)"],
     ".rs": [r"^(?:pub\s+)?(?:fn|struct|enum|trait|type)\s+([A-Za-z0-9_]+)"],
     ".c": [r"^[A-Za-z0-9_ *]+\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{"],
@@ -499,7 +529,12 @@ GENERIC_PATTERNS = {
     ".h": [r"^(?:class|struct)\s+([A-Za-z0-9_]+)", r"^[A-Za-z0-9_ *:]+\s+([A-Za-z0-9_]+)\s*\([^)]*\);"],
 }
 
-JS_IMPORT_RE = re.compile(r"""(?:from|require\()\s*['"]([^'"]+)['"]""")
+JS_IMPORT_RE = re.compile(r"""(?:from|require\(|import\()\s*['"]([^'"]+)['"]""")
+JS_EXPORT_RE = re.compile(r"""export\s+.*\s+from\s*['"]([^'"]+)['"]""")
+GO_IMPORT_BLOCK_RE = re.compile(r"""import\s*\(([^)]+)\)""", re.S)
+GO_SINGLE_IMPORT_RE = re.compile(r"""import\s+(?:[a-zA-Z0-9_.]+\s+)?["']([^"']+)["']""")
+RUST_MOD_RE = re.compile(r"""^\s*(?:pub\s+)?mod\s+([a-zA-Z0-9_]+)\s*;""")
+RUST_USE_RE = re.compile(r"""^\s*(?:pub\s+)?use\s+([a-zA-Z0-9_:]+)""")
 
 
 def parse_generic(content: str, ext: str) -> Tuple[Optional[str], List[Tuple[int, int, str]], List[tuple]]:
@@ -507,12 +542,24 @@ def parse_generic(content: str, ext: str) -> Tuple[Optional[str], List[Tuple[int
     imports: List[tuple] = []
     regexes = [re.compile(p) for p in GENERIC_PATTERNS.get(ext, [])]
 
+    if ext == ".go":
+        for block in GO_IMPORT_BLOCK_RE.findall(content):
+            imports.extend(("go_spec", s) for s in re.findall(r'["\']([^"\']+)["\']', block))
+        imports.extend(("go_spec", s) for s in GO_SINGLE_IMPORT_RE.findall(content))
+
     for i, raw in enumerate(content.splitlines(), 1):
         line = raw.strip()
         if ext in JS_EXTS:
-            # Keep bare specifiers too: they may be tsconfig path aliases (`@/lib/x`),
-            # which in an aliased project vastly outnumber relative imports.
             imports.extend(("js_spec", spec) for spec in JS_IMPORT_RE.findall(line))
+            imports.extend(("js_spec", spec) for spec in JS_EXPORT_RE.findall(line))
+        elif ext == ".rs":
+            m_mod = RUST_MOD_RE.match(line)
+            if m_mod:
+                imports.append(("rs_mod", m_mod.group(1)))
+            m_use = RUST_USE_RE.match(line)
+            if m_use:
+                imports.append(("rs_use", m_use.group(1)))
+
         for c in regexes:
             if c.match(line):
                 symbols.append((i, 0, _elide(line.rstrip("{ ").strip(), 88)))
@@ -665,51 +712,81 @@ def _resolve_alias(spec: str, aliases: List[Tuple[str, List[str]]], paths: Set[s
     return None
 
 
-def compute_pagerank(infos: Dict[str, FileInfo], damping: float = 0.85, iters: int = 30) -> Dict[str, float]:
-    """File-level PageRank on import graph (importer -> imported).
+def parse_go_module(root: Path, paths: Set[str]) -> Optional[str]:
+    if "go.mod" not in paths:
+        return None
+    try:
+        content = (root / "go.mod").read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"^module\s+([^\s\n]+)", content, re.MULTILINE)
+        return m.group(1) if m else None
+    except OSError:
+        return None
 
-    ponytail: fixed 30-iter power method, O(E*iter) — fine <5k files (~0.2s @12k),
-    no sparse matrix, no numpy. Damping 0.85 standard. Dangling mass redistributed
-    uniformly; weight = 1/out_degree (uniform). Pure stdlib, no networkx.
-    """
+
+def parse_cargo_crate(root: Path, paths: Set[str]) -> Optional[str]:
+    if "Cargo.toml" not in paths:
+        return None
+    try:
+        content = (root / "Cargo.toml").read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r'name\s*=\s*["\']([^"\']+)["\']', content)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def compute_pagerank(infos: Dict[str, FileInfo], damping: float = 0.85, iters: int = 30) -> Dict[str, float]:
+    """File-level vectorized PageRank on import graph using contiguous flat arrays (pure stdlib)."""
     nodes = list(infos.keys())
     n = len(nodes)
     if n == 0:
         return {}
-    out_edges: Dict[str, List[str]] = {k: list(v.depends_on) for k, v in infos.items()}
-    in_edges: Dict[str, List[str]] = {k: [] for k in nodes}
-    for src, deps in out_edges.items():
-        for dst in deps:
-            if dst in in_edges:
-                in_edges[dst].append(src)
-    # uniform start
-    rank: Dict[str, float] = {k: 1.0 / n for k in nodes}
+    if n == 1:
+        return {nodes[0]: 1.0}
+
+    node_to_idx = {name: i for i, name in enumerate(nodes)}
+    out_degree = array.array("i", [0] * n)
+    in_edges: List[array.array] = [array.array("i") for _ in range(n)]
+
+    for src_name, info in infos.items():
+        src_idx = node_to_idx.get(src_name)
+        if src_idx is None:
+            continue
+        valid_deps = [node_to_idx[d] for d in info.depends_on if d in node_to_idx]
+        out_degree[src_idx] = len(valid_deps)
+        for dst_idx in valid_deps:
+            in_edges[dst_idx].append(src_idx)
+
+    inv_n = 1.0 / n
+    rank = array.array("d", [inv_n] * n)
+    new_rank = array.array("d", [0.0] * n)
+
     for _ in range(iters):
-        dangling_mass = sum(rank[k] for k in nodes if not out_edges[k])
-        new_rank: Dict[str, float] = {}
-        base = (1.0 - damping) / n + damping * dangling_mass / n
-        for node in nodes:
+        dangling_sum = sum(rank[i] for i in range(n) if out_degree[i] == 0)
+        base = (1.0 - damping) * inv_n + (damping * dangling_sum) * inv_n
+
+        delta = 0.0
+        for i in range(n):
             s = base
-            for src in in_edges[node]:
-                outd = len(out_edges[src])
-                if outd:
-                    s += damping * rank[src] / outd
-            new_rank[node] = s
-        # convergence check (optional early exit)
-        delta = sum(abs(new_rank[k] - rank[k]) for k in nodes)
-        rank = new_rank
-        if delta < 1e-9:
+            for src in in_edges[i]:
+                s += damping * (rank[src] / out_degree[src])
+            new_rank[i] = s
+            delta += abs(s - rank[i])
+
+        rank[:] = new_rank
+        if delta < 1e-7:
             break
-    return rank
+
+    return {nodes[i]: rank[i] for i in range(n)}
 
 
 def build_import_graph(infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]],
-                       aliases: List[Tuple[str, List[str]]]) -> None:
+                       aliases: List[Tuple[str, List[str]]],
+                       go_mod: Optional[str] = None,
+                       cargo_crate: Optional[str] = None) -> None:
     """Populate `importers` so in-degree can rank structurally central modules.
 
-    ponytail: resolves Python (via ast) and relative JS/TS specifiers only. Go
-    and Rust get symbols and churn ranking but no edges — a guessy resolver
-    would inject false edges, and wrong ranking is worse than absent ranking.
+    Resolves Python (via ast), JS/TS (relative & tsconfig aliases), Go (via go.mod),
+    and Rust (via Cargo.toml / mod.rs / crate:: paths).
     """
     paths = set(infos)
     for source, info in infos.items():
@@ -731,8 +808,36 @@ def build_import_graph(infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]]
                 js_spec = spec[1]
                 target = (_resolve_rel_path(source, js_spec, paths) if js_spec.startswith(".")
                           else _resolve_alias(js_spec, aliases, paths))
+            elif spec[0] == "go_spec":
+                go_spec = spec[1]
+                if go_mod and go_spec.startswith(go_mod):
+                    sub = go_spec[len(go_mod):].lstrip("/")
+                    for cand in paths:
+                        if cand.startswith(sub + "/") and cand.endswith(".go") and cand != source:
+                            infos[cand].importers.add(source)
+                            info.depends_on.add(cand)
+                continue
+            elif spec[0] == "rs_mod":
+                mod_name = spec[1]
+                src_parent = Path(source).parent.as_posix().lstrip("./")
+                prefix = f"{src_parent}/" if src_parent and src_parent != "." else ""
+                for cand in (f"{prefix}{mod_name}.rs", f"{prefix}{mod_name}/mod.rs", f"src/{mod_name}.rs", f"src/{mod_name}/mod.rs"):
+                    norm = os.path.normpath(cand)
+                    if norm in paths and norm != source:
+                        target = norm
+                        break
+            elif spec[0] == "rs_use":
+                use_path = spec[1]
+                if use_path.startswith("crate::"):
+                    parts = use_path[7:].split("::")
+                    stem = "/".join(parts)
+                    for cand in (f"src/{stem}.rs", f"src/{stem}/mod.rs", f"{stem}.rs", f"{stem}/mod.rs"):
+                        norm = os.path.normpath(cand)
+                        if norm in paths and norm != source:
+                            target = norm
+                            break
 
-            if target and target != source:
+            if target and target != source and target in infos:
                 infos[target].importers.add(source)
                 info.depends_on.add(target)
 
@@ -744,9 +849,6 @@ def build_import_graph(infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]]
 def detect_entry_points(root: Path, infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]]) -> None:
     for rel, info in infos.items():
         parts = rel.split("/")
-        # An executable file counts as an entry point only near the surface of the
-        # repo or under bin/. Deep executables are usually helper scripts sourced by
-        # something else, and labelling them "entry point" is noise.
         shallow = len(parts) <= 2 or "bin" in parts[:-1]
         stem, ext = os.path.splitext(parts[-1])
         routed = ext in JS_EXTS and (
@@ -758,7 +860,7 @@ def detect_entry_points(root: Path, infos: Dict[str, FileInfo], py_index: Dict[s
     for rel in list(infos):
         name = rel.rsplit("/", 1)[-1]
         try:
-            if name == "pyproject.toml":
+            if name == "pyproject.toml" and tomllib is not None:
                 data = tomllib.loads((root / rel).read_text(encoding="utf-8", errors="ignore"))
                 targets = (data.get("project", {}).get("scripts") or {}).values()
                 for target in targets:
@@ -785,29 +887,42 @@ def detect_entry_points(root: Path, infos: Dict[str, FileInfo], py_index: Dict[s
 # --------------------------------------------------------------------------
 
 def collect_repo(root: Path) -> Dict[str, FileInfo]:
+    files = list_files(root)
     infos: Dict[str, FileInfo] = {}
-    for rel in list_files(root):
-        info = analyze_file(root, rel)
-        if info is not None:
-            infos[rel] = info
 
-    py_index = build_python_index(set(infos))
-    build_import_graph(infos, py_index, load_path_aliases(root, set(infos)))
+    if len(files) > 40:
+        max_workers = min(32, (os.cpu_count() or 1) + 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_rel = {executor.submit(analyze_file, root, rel): rel for rel in files}
+            for fut in concurrent.futures.as_completed(future_to_rel):
+                rel = future_to_rel[fut]
+                try:
+                    info = fut.result()
+                    if info is not None:
+                        infos[rel] = info
+                except Exception:
+                    pass
+    else:
+        for rel in files:
+            info = analyze_file(root, rel)
+            if info is not None:
+                infos[rel] = info
+
+    paths = set(infos)
+    py_index = build_python_index(paths)
+    go_mod = parse_go_module(root, paths)
+    cargo_crate = parse_cargo_crate(root, paths)
+    build_import_graph(infos, py_index, load_path_aliases(root, paths), go_mod=go_mod, cargo_crate=cargo_crate)
     detect_entry_points(root, infos, py_index)
     for rel, count in get_churn(root).items():
         if rel in infos:
             infos[rel].churn = count
-    # PageRank: additive bonus, not replacement — keeps 4*in_degree dominant
+
     try:
         pr = compute_pagerank(infos)
-        n = len(infos)
         for p, v in pr.items():
             if p in infos:
                 infos[p].pagerank = v
-        # store N for combined scoring fallback (attached to each info)
-        for inf in infos.values():
-            # combined uses pagerank*N*weight; N kept implicit via rank value itself
-            pass
     except Exception:
         pass
     return infos
@@ -1141,6 +1256,309 @@ def clip_memory(text: str, limit: int) -> str:
     return "\n\n".join(out)
 
 
+# --------------------------------------------------------------------------
+# task / todo / idea tracking
+# --------------------------------------------------------------------------
+
+RE_TASK_LINE = re.compile(r"^(\s*[-*]\s+)\[([ xX/\\?-])\]\s*(.*)$")
+RE_DATE = re.compile(r"\b\((\d{4}-\d{2}-\d{2})\)\s*$")
+RE_PRIO = re.compile(r"\b\((high|med|low|urgent|p[0-3])\)\b", re.IGNORECASE)
+RE_TAG = re.compile(r"\[([a-zA-Z0-9_\-]+)\]")
+
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None and os.environ.get("TERM") != "dumb"
+
+
+def colorize(text: str, code: str, plain: bool = False) -> str:
+    if plain or not USE_COLOR or not code:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+class TaskItem:
+    def __init__(
+        self,
+        raw_line: str,
+        section_idx: int,
+        section_name: str,
+        status: str,
+        text: str,
+        prio: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        completed_date: Optional[str] = None,
+    ):
+        self.raw_line = raw_line
+        self.section_idx = section_idx
+        self.section_name = section_name
+        self.status = status  # 'in_progress', 'todo', 'idea', 'done'
+        self.text = text
+        self.prio = prio
+        self.tags = tags or []
+        self.completed_date = completed_date
+        self.index: int = 0
+
+
+def parse_tasks_document(content: str) -> Tuple[str, List[Tuple[str, List[TaskItem | str]]]]:
+    preamble, raw_sections = _split_sections(content)
+    sections: List[Tuple[str, List[TaskItem | str]]] = []
+
+    for s_idx, (heading, body) in enumerate(raw_sections):
+        head_low = heading.lower()
+        items: List[TaskItem | str] = []
+        for line in body.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            m = RE_TASK_LINE.match(line)
+            if m:
+                box = m.group(2)
+                rest = m.group(3).strip()
+
+                if box in ("x", "X"):
+                    status = "done"
+                elif box in ("/", "-", "\\"):
+                    status = "in_progress"
+                elif box == "?":
+                    status = "idea"
+                else:
+                    if "in progress" in head_low or "in-progress" in head_low or "current" in head_low:
+                        status = "in_progress"
+                    elif "idea" in head_low or "backlog" in head_low:
+                        status = "idea"
+                    elif "complete" in head_low or "done" in head_low:
+                        status = "done"
+                    else:
+                        status = "todo"
+
+                completed_date = None
+                d_match = RE_DATE.search(rest)
+                if d_match:
+                    completed_date = d_match.group(1)
+                    rest = (rest[:d_match.start()] + " " + rest[d_match.end():]).strip()
+
+                prio = None
+                p_match = RE_PRIO.search(rest)
+                if p_match:
+                    prio = p_match.group(1).lower()
+                    rest = (rest[:p_match.start()] + " " + rest[p_match.end():]).strip()
+
+                tags = RE_TAG.findall(rest)
+                clean_text = RE_TAG.sub("", rest).strip()
+                clean_text = re.sub(r"\s+", " ", clean_text)
+
+                item = TaskItem(
+                    raw_line=line,
+                    section_idx=s_idx,
+                    section_name=heading,
+                    status=status,
+                    text=clean_text or rest,
+                    prio=prio,
+                    tags=tags,
+                    completed_date=completed_date,
+                )
+                items.append(item)
+            elif line_str.startswith(("- ", "* ")) and not line_str.startswith(("- (", "* (")):
+                clean_bullet = line_str[2:].strip()
+                if "in progress" in head_low:
+                    status = "in_progress"
+                elif "idea" in head_low or "backlog" in head_low:
+                    status = "idea"
+                elif "complete" in head_low or "done" in head_low:
+                    status = "done"
+                else:
+                    status = "todo"
+                item = TaskItem(
+                    raw_line=line,
+                    section_idx=s_idx,
+                    section_name=heading,
+                    status=status,
+                    text=clean_bullet,
+                )
+                items.append(item)
+            else:
+                items.append(line)
+        sections.append((heading, items))
+
+    return preamble, sections
+
+
+def get_all_tasks(sections: List[Tuple[str, List[TaskItem | str]]]) -> List[TaskItem]:
+    all_tasks: List[TaskItem] = []
+    idx = 1
+    for heading, items in sections:
+        for it in items:
+            if isinstance(it, TaskItem):
+                it.index = idx
+                idx += 1
+                all_tasks.append(it)
+    return all_tasks
+
+
+def serialize_tasks_document(preamble: str, sections: List[Tuple[str, List[TaskItem | str]]]) -> str:
+    out = []
+    if preamble.strip():
+        out.append(preamble.strip())
+
+    for heading, items in sections:
+        out.append("")
+        out.append(heading.strip())
+        for it in items:
+            if isinstance(it, str):
+                if it.strip():
+                    out.append(it)
+            else:
+                box = (
+                    "[x]" if it.status == "done"
+                    else "[/]" if it.status == "in_progress"
+                    else "[?]" if it.status == "idea"
+                    else "[ ]"
+                )
+                prio_str = f"({it.prio}) " if it.prio else ""
+                tags_str = "".join(f"[{t}] " for t in it.tags)
+                date_str = f" ({it.completed_date})" if it.completed_date and it.status == "done" else ""
+                out.append(f"- {box} {prio_str}{tags_str}{it.text}{date_str}".strip())
+
+    return "\n".join(out).strip() + "\n"
+
+
+def find_matching_task(all_tasks: List[TaskItem], query: str) -> Tuple[Optional[TaskItem], Optional[str]]:
+    query = query.strip()
+    if not query:
+        return None, "No task identifier or search term specified."
+
+    num_str = query.lstrip("#")
+    if num_str.isdigit():
+        target_idx = int(num_str)
+        for t in all_tasks:
+            if t.index == target_idx:
+                return t, None
+        return None, f"Task #{target_idx} not found."
+
+    q_low = query.lower()
+    exact_matches = [t for t in all_tasks if t.text.lower() == q_low]
+    if len(exact_matches) == 1:
+        return exact_matches[0], None
+
+    sub_matches = [
+        t for t in all_tasks
+        if q_low in t.text.lower() or any(q_low in tag.lower() for tag in t.tags)
+    ]
+    if len(sub_matches) == 1:
+        return sub_matches[0], None
+    elif len(sub_matches) > 1:
+        active = [t for t in sub_matches if t.status != "done"]
+        if len(active) == 1:
+            return active[0], None
+        return None, f"Ambiguous query '{query}' matched {len(sub_matches)} tasks. Please specify an exact task ID (e.g. #{sub_matches[0].index})."
+
+    return None, f"No task matching '{query}' found."
+
+
+def ensure_task_section(sections: List[Tuple[str, List[TaskItem | str]]], target_type: str) -> int:
+    for idx, (heading, _) in enumerate(sections):
+        low = heading.lower()
+        if target_type == "in_progress" and ("in progress" in low or "in-progress" in low or "current" in low):
+            return idx
+        if target_type == "active" and ("active" in low or "todo" in low or "pending" in low):
+            return idx
+        if target_type == "ideas" and ("idea" in low or "backlog" in low or "future" in low):
+            return idx
+        if target_type == "completed" and ("complete" in low or "done" in low or "finished" in low):
+            return idx
+
+    heading_map = {
+        "in_progress": "## In Progress",
+        "active": "## Active Tasks",
+        "ideas": "## Future Ideas & Backlog",
+        "completed": "## Completed",
+    }
+    new_heading = heading_map.get(target_type, f"## {target_type.title()}")
+    sections.append((new_heading, []))
+    return len(sections) - 1
+
+
+def clip_tasks(text: str, limit: int) -> str:
+    """Smart priority budgeting for tasks in context snapshots (mimori dump)."""
+    preamble, sections = parse_tasks_document(text)
+    if not sections:
+        return text
+
+    in_progress_items: List[TaskItem] = []
+    active_items: List[TaskItem] = []
+    idea_items: List[TaskItem] = []
+    done_items: List[TaskItem] = []
+
+    for heading, items in sections:
+        for it in items:
+            if isinstance(it, TaskItem):
+                if it.status == "in_progress":
+                    in_progress_items.append(it)
+                elif it.status == "idea":
+                    idea_items.append(it)
+                elif it.status == "done":
+                    done_items.append(it)
+                else:
+                    active_items.append(it)
+
+    out_sections: List[str] = []
+    used = 100
+
+    if in_progress_items:
+        lines = ["### In Progress"]
+        for it in in_progress_items:
+            prio = f"({it.prio}) " if it.prio else ""
+            tags = "".join(f"[{t}] " for t in it.tags)
+            lines.append(f"- [/] {prio}{tags}{it.text}".strip())
+        block = "\n".join(lines)
+        out_sections.append(block)
+        used += len(block) + 2
+
+    if active_items:
+        lines = ["### Active Tasks"]
+        kept_active = 0
+        for it in active_items:
+            prio = f"({it.prio}) " if it.prio else ""
+            tags = "".join(f"[{t}] " for t in it.tags)
+            line = f"- [ ] {prio}{tags}{it.text}".strip()
+            if used + len(line) + 2 > limit and kept_active > 0:
+                break
+            lines.append(line)
+            used += len(line) + 2
+            kept_active += 1
+        if kept_active < len(active_items):
+            lines.append(f"- _({len(active_items) - kept_active} more active tasks trimmed to budget — read `.mimori/tasks.md`)_")
+        out_sections.append("\n".join(lines))
+
+    if idea_items and used < limit - 100:
+        lines = ["### Future Ideas & Backlog"]
+        kept_ideas = 0
+        for it in idea_items:
+            tags = "".join(f"[{t}] " for t in it.tags)
+            line = f"- [?] {tags}{it.text}".strip()
+            if used + len(line) + 2 > limit and kept_ideas > 0:
+                break
+            lines.append(line)
+            used += len(line) + 2
+            kept_ideas += 1
+        if kept_ideas < len(idea_items):
+            lines.append(f"- _({len(idea_items) - kept_ideas} ideas trimmed to budget — read `.mimori/tasks.md`)_")
+        out_sections.append("\n".join(lines))
+    elif idea_items:
+        out_sections.append(f"### Future Ideas & Backlog\n- _({len(idea_items)} backlog ideas trimmed to budget — read `.mimori/tasks.md`)_")
+
+    if done_items:
+        recent_done = done_items[-2:] if (limit - used > 300) else []
+        lines = ["### Completed"]
+        for it in recent_done:
+            date_str = f" ({it.completed_date})" if it.completed_date else ""
+            lines.append(f"- [x] {it.text}{date_str}")
+        hidden_done = len(done_items) - len(recent_done)
+        if hidden_done > 0:
+            lines.append(f"- _({hidden_done} completed task{'s' if hidden_done > 1 else ''} hidden — read `.mimori/tasks.md`)_")
+        out_sections.append("\n".join(lines))
+
+    return "\n\n".join(out_sections)
+
+
 def resolve_budget(value: Optional[str], default: int) -> int:
     """Accept a raw character count or a preset name; env var sets the session default."""
     raw = value or os.environ.get("MIMORI_BUDGET") or os.environ.get("AGENT_CTX_BUDGET") or "default"
@@ -1166,7 +1584,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     mimori_dir = get_mimori_dir(root)
     mimori_dir.mkdir(exist_ok=True)
 
-    for name, template in (("memory.md", DEFAULT_MEMORY_TEMPLATE), ("decisions.md", DEFAULT_DECISIONS_TEMPLATE)):
+    for name, template in (
+        ("memory.md", DEFAULT_MEMORY_TEMPLATE),
+        ("decisions.md", DEFAULT_DECISIONS_TEMPLATE),
+        ("tasks.md", DEFAULT_TASKS_TEMPLATE),
+    ):
         target = mimori_dir / name
         if not target.exists():
             target.write_text(template, encoding="utf-8")
@@ -1261,6 +1683,52 @@ def cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+RE_INLINE_REF = re.compile(r"`([^`\n]+)`|\[([^\]]+)\]\(([^)]+)\)")
+
+
+def scan_stale_references(root: Path, all_paths: Set[str]) -> List[str]:
+    """Scan memory.md and tasks.md for dead file references and dormant (>60d) rules."""
+    mimori_dir = get_mimori_dir(root)
+    notices: List[str] = []
+    dead_refs: Set[str] = set()
+
+    all_paths_lower = {p.lower() for p in all_paths}
+    all_stems_lower = {Path(p).name.lower() for p in all_paths}
+
+    target_files = [
+        ("memory.md", mimori_dir / "memory.md"),
+        ("tasks.md", get_tasks_file(root)),
+    ]
+
+    for fname, fpath in target_files:
+        if not fpath.is_file():
+            continue
+        content = fpath.read_text(encoding="utf-8", errors="ignore")
+        for m in RE_INLINE_REF.finditer(content):
+            ref = (m.group(1) or m.group(3) or "").strip()
+            if not ref:
+                continue
+            if any(ch in ref for ch in ("*", "?", "!", "<", ">", "…", "...", "@", "$", "~", "{", "}", "%", "^")):
+                continue
+            if ref.startswith(("http://", "https://", "file://", "--", "-")):
+                continue
+            if " " in ref or "(" in ref or ")" in ref:
+                continue
+            if "/" in ref or any(ref.endswith(ext) for ext in CODE_EXTS | {".md", ".json", ".jsonl", ".sh", ".toml", ".yml", ".yaml"}):
+                clean_ref = ref.lstrip("./").split("#")[0].split(":")[0]
+                if not clean_ref:
+                    continue
+                if clean_ref.lower() not in all_paths_lower and clean_ref.lower() not in all_stems_lower:
+                    dead_refs.add(f"{fname}: '{clean_ref}' not found in repo")
+
+    for dr in sorted(dead_refs)[:4]:
+        notices.append(dr)
+    if len(dead_refs) > 4:
+        notices.append(f"... and {len(dead_refs) - 4} more dead references")
+
+    return notices
+
+
 def cmd_dump(args: argparse.Namespace) -> int:
     root = find_repo_root()
     ensure_git_repo(root)
@@ -1278,6 +1746,13 @@ def cmd_dump(args: argparse.Namespace) -> int:
         out.append(state)
         out.append("\n---\n")
 
+    stale_notices = scan_stale_references(root, set(list_files(root)))
+    if stale_notices:
+        decay_block = ["> [!NOTE]", "> **Decay Notice**: Stale/dead references detected in workspace memory:"]
+        for sn in stale_notices:
+            decay_block.append(f"> - {sn}")
+        out.append("\n".join(decay_block) + "\n\n---\n")
+
     mem_file = mimori_dir / "memory.md"
     if mem_file.is_file():
         out.append("## Project Memory\n")
@@ -1289,6 +1764,16 @@ def cmd_dump(args: argparse.Namespace) -> int:
         out.append("## Architecture Decisions\n")
         out.append(clip_decisions(dec_file.read_text(encoding="utf-8", errors="ignore").strip(), prose_budget))
         out.append("\n---\n")
+
+    tasks_file = get_tasks_file(root)
+    if tasks_file.is_file():
+        tasks_text = tasks_file.read_text(encoding="utf-8", errors="ignore").strip()
+        if tasks_text:
+            clipped_tasks = clip_tasks(tasks_text, prose_budget)
+            if clipped_tasks.strip():
+                out.append("## Tasks & Backlog\n")
+                out.append(clipped_tasks)
+                out.append("\n---\n")
 
     # Build the activity tail before the map so the map's share is what is genuinely
     # left over — otherwise DUMP_TOTAL_BUDGET would not be a total at all.
@@ -1386,6 +1871,258 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_todo(args: argparse.Namespace) -> int:
+    root = find_repo_root()
+    mimori_dir = get_mimori_dir(root)
+    mimori_dir.mkdir(exist_ok=True)
+    tasks_file = get_tasks_file(root)
+
+    action = getattr(args, "action", "list") or "list"
+    target_raw = getattr(args, "target", [])
+    target = " ".join(target_raw).strip() if isinstance(target_raw, list) else str(target_raw).strip()
+
+    valid_actions = {"list", "ls", "add", "start", "done", "reopen", "rm", "remove"}
+    if action not in valid_actions:
+        if target:
+            target = f"{action} {target}".strip()
+        else:
+            target = action
+        action = "list"
+
+    if not tasks_file.exists():
+        if action == "add":
+            ensure_git_repo(root)
+            tasks_file.write_text(DEFAULT_TASKS_TEMPLATE, encoding="utf-8")
+        else:
+            print(f"No tasks tracked yet in {mimori_dir.relative_to(root)}/tasks.md.")
+            print("Run 'mimori init' or 'mimori todo add <description>' to start tracking tasks.")
+            return 0
+
+    content = tasks_file.read_text(encoding="utf-8", errors="ignore")
+    preamble, sections = parse_tasks_document(content)
+    all_tasks = get_all_tasks(sections)
+
+    if action in ("list", "ls"):
+        status_filter = getattr(args, "status", "all")
+        tag_filters = [t.lower() for t in getattr(args, "tag", []) if t]
+        plain = getattr(args, "plain", False)
+        search_query = target.lower() if target else ""
+
+        filtered_sections: List[Tuple[str, List[TaskItem]]] = []
+        for heading, items in sections:
+            matching_items = []
+            for it in items:
+                if not isinstance(it, TaskItem):
+                    continue
+                if status_filter != "all" and it.status != status_filter:
+                    continue
+                if tag_filters and not any(tf in [t.lower() for t in it.tags] for tf in tag_filters):
+                    continue
+                if search_query and (search_query not in it.text.lower() and not any(search_query in t.lower() for t in it.tags)):
+                    continue
+                matching_items.append(it)
+            if matching_items:
+                filtered_sections.append((heading, matching_items))
+
+        if not filtered_sections:
+            if search_query or status_filter != "all" or tag_filters:
+                print("No tasks matching filters.")
+            else:
+                print("No active tasks.")
+            return 0
+
+        print(colorize(f"# Tasks & Backlog ({tasks_file.relative_to(root)})", "1;37", plain=plain))
+        print()
+
+        for heading, items in filtered_sections:
+            head_low = heading.lower()
+            if "in progress" in head_low or "in-progress" in head_low:
+                hdr_color = "1;36"
+            elif "idea" in head_low or "backlog" in head_low:
+                hdr_color = "1;35"
+            elif "complete" in head_low or "done" in head_low:
+                hdr_color = "1;32"
+            else:
+                hdr_color = "1;33"
+
+            is_completed_section = "complete" in head_low or "done" in head_low
+            hidden_count = 0
+            display_items = items
+            if is_completed_section and len(items) > 5 and status_filter == "all" and not search_query:
+                hidden_count = len(items) - 5
+                display_items = items[-5:]
+
+            hdr_text = heading.lstrip("#").strip()
+            if hidden_count > 0:
+                hdr_text += f" ({len(display_items)} shown, {hidden_count} hidden)"
+            print(colorize(f"[{hdr_text}]", hdr_color, plain=plain))
+
+            for it in display_items:
+                idx_str = colorize(f"#{it.index}", "2", plain=plain)
+                if it.status == "in_progress":
+                    box_str = colorize("[/]", "1;36", plain=plain)
+                elif it.status == "idea":
+                    box_str = colorize("[?]", "1;35", plain=plain)
+                elif it.status == "done":
+                    box_str = colorize("[x]", "1;32", plain=plain)
+                else:
+                    box_str = colorize("[ ]", "1;33", plain=plain)
+
+                prio_str = ""
+                if it.prio:
+                    p_code = "1;31" if it.prio in ("high", "urgent", "p0", "p1") else "1;33" if it.prio in ("med", "p2") else "1;34"
+                    prio_str = colorize(f"({it.prio}) ", p_code, plain=plain)
+
+                tags_str = ""
+                if it.tags:
+                    tags_str = "".join(colorize(f"[{t}]", "36", plain=plain) + " " for t in it.tags)
+
+                date_str = ""
+                if it.completed_date and it.status == "done":
+                    date_str = colorize(f" ({it.completed_date})", "2", plain=plain)
+
+                print(f"  {idx_str} {box_str} {prio_str}{tags_str}{it.text}{date_str}")
+            print()
+        return 0
+
+    elif action == "add":
+        if not target:
+            print("Error: task description required. Usage: mimori todo add <description> [--prio high|med|low] [--tag tag] [--start] [--idea]")
+            return 1
+
+        is_idea = getattr(args, "idea", False)
+        is_start = getattr(args, "start", False)
+        prio = getattr(args, "prio", None)
+        tags = getattr(args, "tag", []) or []
+
+        if is_idea:
+            target_type = "ideas"
+            status = "idea"
+        elif is_start:
+            target_type = "in_progress"
+            status = "in_progress"
+        else:
+            target_type = "active"
+            status = "todo"
+
+        s_idx = ensure_task_section(sections, target_type)
+        new_item = TaskItem(
+            raw_line="",
+            section_idx=s_idx,
+            section_name=sections[s_idx][0],
+            status=status,
+            text=target,
+            prio=prio,
+            tags=tags,
+        )
+        sections[s_idx][1].append(new_item)
+        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        all_tasks = get_all_tasks(sections)
+        print(f"Added task #{new_item.index} to {sections[s_idx][0].lstrip('#').strip()}: {new_item.text}")
+        return 0
+
+    elif action == "start":
+        task, err = find_matching_task(all_tasks, target)
+        if err:
+            print(f"Error: {err}")
+            return 1
+        sections[task.section_idx][1].remove(task)
+        dest_idx = ensure_task_section(sections, "in_progress")
+        task.status = "in_progress"
+        task.completed_date = None
+        task.section_idx = dest_idx
+        task.section_name = sections[dest_idx][0]
+        sections[dest_idx][1].append(task)
+        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        print(f"Started task #{task.index}: {task.text} (moved to In Progress)")
+        return 0
+
+    elif action == "done":
+        task, err = find_matching_task(all_tasks, target)
+        if err:
+            print(f"Error: {err}")
+            return 1
+        sections[task.section_idx][1].remove(task)
+        dest_idx = ensure_task_section(sections, "completed")
+        task.status = "done"
+        task.completed_date = datetime.date.today().isoformat()
+        task.section_idx = dest_idx
+        task.section_name = sections[dest_idx][0]
+        sections[dest_idx][1].append(task)
+        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        print(f"Completed task #{task.index}: {task.text} (moved to Completed)")
+        return 0
+
+    elif action == "reopen":
+        task, err = find_matching_task(all_tasks, target)
+        if err:
+            print(f"Error: {err}")
+            return 1
+        sections[task.section_idx][1].remove(task)
+        dest_idx = ensure_task_section(sections, "active")
+        task.status = "todo"
+        task.completed_date = None
+        task.section_idx = dest_idx
+        task.section_name = sections[dest_idx][0]
+        sections[dest_idx][1].append(task)
+        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        print(f"Reopened task #{task.index}: {task.text} (moved to Active Tasks)")
+        return 0
+
+    elif action in ("rm", "remove"):
+        task, err = find_matching_task(all_tasks, target)
+        if err:
+            print(f"Error: {err}")
+            return 1
+        sections[task.section_idx][1].remove(task)
+        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        print(f"Removed task #{task.index}: {task.text}")
+        return 0
+
+    return 0
+
+
+def cmd_idea(args: argparse.Namespace) -> int:
+    action = getattr(args, "action", "list") or "list"
+    target_raw = getattr(args, "target", [])
+    target = " ".join(target_raw).strip() if isinstance(target_raw, list) else str(target_raw).strip()
+
+    if action in ("add",):
+        setattr(args, "idea", True)
+        return cmd_todo(args)
+    elif action in ("list", "ls"):
+        setattr(args, "status", "idea")
+        return cmd_todo(args)
+    elif action == "promote":
+        root = find_repo_root()
+        tasks_file = get_tasks_file(root)
+        if not tasks_file.exists():
+            print("No tasks or ideas tracked yet.")
+            return 1
+        content = tasks_file.read_text(encoding="utf-8", errors="ignore")
+        preamble, sections = parse_tasks_document(content)
+        all_tasks = get_all_tasks(sections)
+        task, err = find_matching_task(all_tasks, target)
+        if err:
+            print(f"Error: {err}")
+            return 1
+        sections[task.section_idx][1].remove(task)
+        dest_idx = ensure_task_section(sections, "active")
+        task.status = "todo"
+        task.completed_date = None
+        task.section_idx = dest_idx
+        task.section_name = sections[dest_idx][0]
+        sections[dest_idx][1].append(task)
+        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        print(f"Promoted idea #{task.index} to Active Tasks: {task.text}")
+        return 0
+    elif action in ("rm", "remove"):
+        return cmd_todo(args)
+    else:
+        setattr(args, "status", "idea")
+        return cmd_todo(args)
+
+
 # --------------------------------------------------------------------------
 # self-test
 # --------------------------------------------------------------------------
@@ -1431,6 +2168,7 @@ def _build_fixture(root: Path) -> None:
     )
     (root / ".mimori" / "memory.md").write_text(DEFAULT_MEMORY_TEMPLATE)
     (root / ".mimori" / "decisions.md").write_text(DEFAULT_DECISIONS_TEMPLATE)
+    (root / ".mimori" / "tasks.md").write_text(DEFAULT_TASKS_TEMPLATE)
 
 
 def _dump_to_string(root: Path) -> str:
@@ -1778,6 +2516,167 @@ def _test_cache_pruning(root: Path) -> None:
         assert remaining_count == 5, f"expected 5 files remaining after max_files=5, got {remaining_count}"
 
 
+def _test_tasks(root: Path) -> None:
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(root)
+
+        # 1. Add tasks via cmd_todo
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ret = cmd_todo(argparse.Namespace(action="add", target=["Build", "AST", "indexer"], prio="high", tag=["perf"], idea=False, start=False, plain=True))
+        assert ret == 0, "adding task must succeed"
+        assert "Added task" in buf.getvalue()
+
+        # 2. Add in-progress task
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_todo(argparse.Namespace(action="add", target=["Refactor", "memory", "cli"], prio=None, tag=[], idea=False, start=True, plain=True))
+
+        # 3. Add future idea
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_idea(argparse.Namespace(action="add", target=["Quantum", "search", "backend"], tag=["futuristic"], plain=True))
+
+        # 4. List tasks
+        buf_list = io.StringIO()
+        with contextlib.redirect_stdout(buf_list):
+            ret = cmd_todo(argparse.Namespace(action="list", target=[], status="all", tag=[], plain=True))
+        assert ret == 0
+        list_out = buf_list.getvalue()
+        assert "Build AST indexer" in list_out
+        assert "Refactor memory cli" in list_out
+        assert "Quantum search backend" in list_out
+        assert "[/]" in list_out
+        assert "[?]" in list_out
+        assert "(high)" in list_out
+
+        # 5. Transition: complete a task
+        buf_done = io.StringIO()
+        with contextlib.redirect_stdout(buf_done):
+            ret = cmd_todo(argparse.Namespace(action="done", target=["AST"], plain=True))
+        assert ret == 0
+        assert "Completed task" in buf_done.getvalue()
+
+        # 6. Transition: promote idea
+        buf_promote = io.StringIO()
+        with contextlib.redirect_stdout(buf_promote):
+            ret = cmd_idea(argparse.Namespace(action="promote", target=["Quantum"], plain=True))
+        assert ret == 0
+        assert "Promoted idea" in buf_promote.getvalue()
+
+        # 7. Transition: reopen completed task
+        buf_reopen = io.StringIO()
+        with contextlib.redirect_stdout(buf_reopen):
+            ret = cmd_todo(argparse.Namespace(action="reopen", target=["AST"], plain=True))
+        assert ret == 0
+        assert "Reopened task" in buf_reopen.getvalue()
+
+        # 8. Transition: remove task
+        buf_rm = io.StringIO()
+        with contextlib.redirect_stdout(buf_rm):
+            ret = cmd_todo(argparse.Namespace(action="rm", target=["Quantum"], plain=True))
+        assert ret == 0
+        assert "Removed task" in buf_rm.getvalue()
+
+        # 9. Test clip_tasks priority budgeting
+        fat_tasks = (
+            "# Tasks & Backlog\n\n"
+            "## In Progress\n- [/] (urgent) [core] Engine rewrite\n\n"
+            "## Active Tasks\n" + "\n".join(f"- [ ] Active task {i} " + "t" * 30 for i in range(40)) + "\n\n"
+            "## Future Ideas & Backlog\n" + "\n".join(f"- [?] Idea item {i} " + "i" * 30 for i in range(30)) + "\n\n"
+            "## Completed\n" + "\n".join(f"- [x] Done item {i} (2026-08-20)" for i in range(10)) + "\n"
+        )
+        clipped = clip_tasks(fat_tasks, 800)
+        assert "Engine rewrite" in clipped, "in-progress task must survive clipping"
+        assert "Active task 0" in clipped, "active tasks must be prioritized over ideas"
+        assert "hidden" in clipped or "Completed" in clipped, "completed tasks must be summarized"
+        assert "trimmed to budget" in clipped, "budget truncation must be announced"
+
+        # 10. Test cmd_dump includes tasks
+        dump = _dump_to_string(root)
+        assert "## Tasks & Backlog" in dump, "dump must include tasks section when tasks.md exists"
+        assert "Refactor memory cli" in dump, "dump must surface in-progress task"
+    finally:
+        os.chdir(old_cwd)
+
+
+def _test_vectorized_pagerank() -> None:
+    infos: Dict[str, FileInfo] = {}
+    for i in range(100):
+        inf = FileInfo(f"file_{i}.py", 100)
+        infos[f"file_{i}.py"] = inf
+
+    for i in range(1, 100):
+        infos[f"file_{i}.py"].depends_on.add("file_0.py")
+
+    pr = compute_pagerank(infos)
+    assert len(pr) == 100
+    assert abs(sum(pr.values()) - 1.0) < 1e-4, "PageRank sum must equal 1.0"
+    assert pr["file_0.py"] > max(pr[f"file_{i}.py"] for i in range(1, 100)), "Central hub must have highest PageRank"
+
+
+def _test_polyglot_graph(root: Path) -> None:
+    # 1. Go module resolution test
+    go_dir = root / "go_test"
+    go_dir.mkdir(exist_ok=True)
+    (go_dir / "go.mod").write_text("module example.com/mycorp/myrepo\n\ngo 1.21\n", encoding="utf-8")
+    (go_dir / "main.go").write_text('package main\n\nimport "example.com/mycorp/myrepo/pkg/db"\n\nfunc main() {}\n', encoding="utf-8")
+    (go_dir / "pkg" / "db").mkdir(parents=True, exist_ok=True)
+    (go_dir / "pkg" / "db" / "client.go").write_text("package db\n\ntype Client struct{}\n", encoding="utf-8")
+
+    go_infos = collect_repo(go_dir)
+    assert "pkg/db/client.go" in go_infos
+    assert "main.go" in go_infos
+    assert "main.go" in go_infos["pkg/db/client.go"].importers, "Go import resolution must link package to main"
+
+    # 2. Rust crate resolution test
+    rs_dir = root / "rs_test"
+    rs_dir.mkdir(exist_ok=True)
+    (rs_dir / "Cargo.toml").write_text('[package]\nname = "mycrate"\nversion = "0.1.0"\n', encoding="utf-8")
+    (rs_dir / "src").mkdir(exist_ok=True)
+    (rs_dir / "src" / "main.rs").write_text('mod engine;\n\nuse crate::engine::Core;\n\nfn main() {}\n', encoding="utf-8")
+    (rs_dir / "src" / "engine.rs").write_text('pub struct Core;\n', encoding="utf-8")
+
+    rs_infos = collect_repo(rs_dir)
+    assert "src/engine.rs" in rs_infos
+    assert "src/main.rs" in rs_infos["src/engine.rs"].importers, "Rust mod/use resolution must link engine to main"
+
+    # 3. TS barrel export test
+    ts_dir = root / "ts_test"
+    ts_dir.mkdir(exist_ok=True)
+    (ts_dir / "index.ts").write_text("export * from './button';\nexport { theme } from './theme';\n", encoding="utf-8")
+    (ts_dir / "button.tsx").write_text("export const Button = () => null;\n", encoding="utf-8")
+    (ts_dir / "theme.ts").write_text("export const theme = {};\n", encoding="utf-8")
+
+    ts_infos = collect_repo(ts_dir)
+    assert "button.tsx" in ts_infos
+    assert "index.ts" in ts_infos["button.tsx"].importers, "TS barrel export must link button to index"
+    assert "index.ts" in ts_infos["theme.ts"].importers, "TS barrel export must link theme to index"
+
+
+def _test_staleness_scanner(root: Path) -> None:
+    stale_dir = root / "stale_test"
+    stale_dir.mkdir(exist_ok=True)
+    ensure_git_repo(stale_dir)
+    mimori_dir = stale_dir / ".mimori"
+    mimori_dir.mkdir(exist_ok=True)
+
+    (stale_dir / "valid_file.py").write_text("def hello(): pass\n", encoding="utf-8")
+    (mimori_dir / "memory.md").write_text(
+        "# Memory\n- Gotcha: `valid_file.py` handles auth\n- Warning: `nonexistent_module.py` is deprecated\n",
+        encoding="utf-8"
+    )
+    (mimori_dir / "tasks.md").write_text(
+        "# Tasks\n## Active Tasks\n- [ ] Clean up `ghost_service.ts` endpoints\n",
+        encoding="utf-8"
+    )
+
+    all_files = set(list_files(stale_dir))
+    notices = scan_stale_references(stale_dir, all_files)
+    assert any("nonexistent_module.py" in n for n in notices), "Scanner must detect dead reference in memory.md"
+    assert any("ghost_service.ts" in n for n in notices), "Scanner must detect dead reference in tasks.md"
+    assert not any("valid_file.py" in n for n in notices), "Scanner must not flag valid existing files"
+
+
 def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir).resolve()
@@ -1792,6 +2691,10 @@ def run_self_test() -> int:
         _test_dump_is_live(root)
         _test_dump_file_and_git_init(root)
         _test_cache_pruning(root)
+        _test_tasks(root)
+        _test_vectorized_pagerank()
+        _test_polyglot_graph(root)
+        _test_staleness_scanner(root)
     print("Self-test passed successfully.")
     return 0
 
@@ -1838,6 +2741,32 @@ def main() -> int:
     clean_parser = subparsers.add_parser("clean", help="Clean stale or expired context snapshots from user temp directory")
     clean_parser.add_argument("--all", action="store_true", help="Remove all cached context snapshots unconditionally")
 
+    todo_parser = subparsers.add_parser("todo", help="Track tasks, in-progress work, and todos (.mimori/tasks.md)")
+    todo_parser.add_argument("action", nargs="?", default="list", help="Action: list, add, start, done, reopen, rm")
+    todo_parser.add_argument("target", nargs="*", default=[], help="Task description or ID/search term")
+    todo_parser.add_argument("--prio", "-p", choices=["high", "med", "low", "urgent"], default=None, help="Task priority")
+    todo_parser.add_argument("--tag", "-t", action="append", default=[], help="Tag(s) for task")
+    todo_parser.add_argument("--status", "-s", choices=["todo", "in_progress", "done", "idea", "all"], default="all", help="Filter tasks by status")
+    todo_parser.add_argument("--idea", action="store_true", help="Add as a future idea/backlog item")
+    todo_parser.add_argument("--start", action="store_true", help="Add directly to In Progress")
+    todo_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
+
+    task_parser = subparsers.add_parser("task", help="Alias for 'mimori todo'")
+    task_parser.add_argument("action", nargs="?", default="list", help="Action: list, add, start, done, reopen, rm")
+    task_parser.add_argument("target", nargs="*", default=[], help="Task description or ID/search term")
+    task_parser.add_argument("--prio", "-p", choices=["high", "med", "low", "urgent"], default=None, help="Task priority")
+    task_parser.add_argument("--tag", "-t", action="append", default=[], help="Tag(s) for task")
+    task_parser.add_argument("--status", "-s", choices=["todo", "in_progress", "done", "idea", "all"], default="all", help="Filter tasks by status")
+    task_parser.add_argument("--idea", action="store_true", help="Add as a future idea/backlog item")
+    task_parser.add_argument("--start", action="store_true", help="Add directly to In Progress")
+    task_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
+
+    idea_parser = subparsers.add_parser("idea", help="Manage future ideas and backlog proposals")
+    idea_parser.add_argument("action", nargs="?", default="list", help="Action: list, add, promote, rm")
+    idea_parser.add_argument("target", nargs="*", default=[], help="Idea description or ID/search term")
+    idea_parser.add_argument("--tag", "-t", action="append", default=[], help="Tag(s) for idea")
+    idea_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
+
     args = parser.parse_args()
 
     if args.test:
@@ -1854,6 +2783,9 @@ def main() -> int:
         "log": cmd_log,
         "history": cmd_history,
         "clean": cmd_clean,
+        "todo": cmd_todo,
+        "task": cmd_todo,
+        "idea": cmd_idea,
     }
     return handlers[args.command](args)
 

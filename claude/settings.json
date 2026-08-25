@@ -29,5 +29,6 @@
   "tui": "fullscreen",
   "theme": "dark",
   "inputNeededNotifEnabled": true,
-  "agentPushNotifEnabled": false
+  "agentPushNotifEnabled": false,
+  "model": "opus"
 }
