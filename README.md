@@ -1,5 +1,10 @@
 # dot-agents
 
+> [!WARNING]
+> **Personal Workflow & Model Configuration Notice**
+> This repository is highly opinionated, bespoke, and strictly optimized for my own personal development workflow and the specific coding models/agents available at the current time (e.g. Gemini 3.7 Flash, Gemini 3.1 Pro, Claude Code, Pi, OpenCode, tmux quota monitors).
+> **It is NOT advised to use this repository as-is for your own setup without careful review and customization.** Feel free to study, fork, or cherry-pick individual tools and skills ([`mimori`](skills/mimori), [`ponytail-debt`](skills/ponytail-debt), etc.) that suit your needs.
+
 > Cross-agent operating system, zero-daemon symbol memory (mimori), and tools for Claude Code, Antigravity, Pi, and OpenCode.
 
 Unified cross-agent operating system, shared operating rules, zero-daemon AST project memory ([`mimori`](skills/mimori)), Mosh-optimized alert dispatching, live quota telemetry, and AST-powered surgical tools across **Claude Code**, **Antigravity / Gemini CLI**, **pi**, and **OpenCode**.
