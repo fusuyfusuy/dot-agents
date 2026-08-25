@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 from pathlib import Path
@@ -67,6 +68,11 @@ ACTIVITY_SUMMARY_LIMIT = 160
 ACTIVITY_FILES_SHOWN = 4
 MAX_PARSE_BYTES = 500_000
 CHURN_DAYS = 90
+
+# Cache retention defaults for context snapshots written to user temp dir ($XDG_RUNTIME_DIR/mimori)
+DEFAULT_CACHE_MAX_PER_REPO = 2
+DEFAULT_CACHE_TTL_HOURS = 72.0
+DEFAULT_CACHE_MAX_FILES = 50
 
 DEFAULT_MEMORY_TEMPLATE = """# Project Memory
 
@@ -156,6 +162,122 @@ def get_user_temp_dir() -> Path:
         base = Path(tmp) / f"mimori-{uid}"
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     return base
+
+
+def format_bytes(num: int) -> str:
+    """Format byte size into human readable string."""
+    val = float(num)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(val) < 1024.0:
+            return f"{val:3.1f} {unit}" if unit != "B" else f"{int(val)} B"
+        val /= 1024.0
+    return f"{val:.1f} TB"
+
+
+def prune_user_temp_dir(
+    temp_dir: Optional[Path] = None,
+    current_repo: Optional[str] = None,
+    max_per_repo: Optional[int] = None,
+    ttl_hours: Optional[float] = None,
+    max_files: Optional[int] = None,
+    now: Optional[float] = None,
+) -> Tuple[int, int]:
+    """Prunes stale snapshot files from temp_dir according to retention policies.
+
+    Enforces:
+      1. Global age TTL (default: 72h).
+      2. Per-repo LRU retention (default: keep newest 2 per repo).
+      3. Global max files cap (default: keep newest 50 files total).
+
+    Returns (pruned_count, pruned_bytes).
+    """
+    if temp_dir is None:
+        temp_dir = get_user_temp_dir()
+    if not temp_dir.is_dir():
+        return 0, 0
+
+    if max_per_repo is None:
+        try:
+            max_per_repo = int(os.environ.get("MIMORI_CACHE_MAX_PER_REPO", DEFAULT_CACHE_MAX_PER_REPO))
+        except ValueError:
+            max_per_repo = DEFAULT_CACHE_MAX_PER_REPO
+
+    if ttl_hours is None:
+        try:
+            ttl_hours = float(os.environ.get("MIMORI_CACHE_TTL_HOURS", DEFAULT_CACHE_TTL_HOURS))
+        except ValueError:
+            ttl_hours = DEFAULT_CACHE_TTL_HOURS
+
+    if max_files is None:
+        try:
+            max_files = int(os.environ.get("MIMORI_CACHE_MAX_FILES", DEFAULT_CACHE_MAX_FILES))
+        except ValueError:
+            max_files = DEFAULT_CACHE_MAX_FILES
+
+    now_ts = time.time() if now is None else now
+    ttl_seconds = ttl_hours * 3600.0
+
+    pruned_count = 0
+    pruned_bytes = 0
+
+    try:
+        entries: List[Tuple[Path, float, int]] = []
+        for p in temp_dir.glob("ctx-*.md"):
+            if not p.is_file():
+                continue
+            try:
+                stat = p.stat()
+                entries.append((p, stat.st_mtime, stat.st_size))
+            except OSError:
+                continue
+
+        to_delete: Set[Path] = set()
+        file_sizes = {p: sz for p, _, sz in entries}
+
+        # 1. Global age TTL
+        if ttl_seconds > 0:
+            for p, mtime, _ in entries:
+                if (now_ts - mtime) > ttl_seconds:
+                    to_delete.add(p)
+
+        # 2. Per-repo retention (ctx-<repo>-<commit>.md)
+        repo_groups: Dict[str, List[Tuple[Path, float]]] = {}
+        for p, mtime, _ in entries:
+            if p in to_delete:
+                continue
+            name = p.stem
+            if name.startswith("ctx-"):
+                parts = name[4:].rsplit("-", 1)
+                repo_name = parts[0] if len(parts) == 2 else name[4:]
+                repo_groups.setdefault(repo_name, []).append((p, mtime))
+
+        if max_per_repo > 0:
+            for r_name, r_files in repo_groups.items():
+                r_files.sort(key=lambda x: x[1], reverse=True)
+                for p, _ in r_files[max_per_repo:]:
+                    to_delete.add(p)
+
+        # 3. Global max files ceiling
+        remaining = [e for e in entries if e[0] not in to_delete]
+        if max_files > 0 and len(remaining) > max_files:
+            remaining.sort(key=lambda x: x[1])
+            excess = len(remaining) - max_files
+            for p, _, _ in remaining[:excess]:
+                to_delete.add(p)
+
+        # Perform deletions
+        for p in to_delete:
+            try:
+                sz = file_sizes.get(p, 0)
+                p.unlink(missing_ok=True)
+                pruned_count += 1
+                pruned_bytes += sz
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+    return pruned_count, pruned_bytes
 
 
 def run_git(root: Path, *args: str, timeout: int = 5) -> Optional[str]:
@@ -1224,7 +1346,9 @@ def cmd_dump(args: argparse.Namespace) -> int:
     if out_target is not None:
         if out_target == "" or out_target is True or out_target is None or isinstance(out_target, bool):
             commit_id = get_repo_identifier(root)
-            dest_file = get_user_temp_dir() / f"ctx-{root.name}-{commit_id}.md"
+            temp_dir = get_user_temp_dir()
+            prune_user_temp_dir(temp_dir, current_repo=root.name)
+            dest_file = temp_dir / f"ctx-{root.name}-{commit_id}.md"
         else:
             dest_file = Path(out_target).resolve()
             dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1234,6 +1358,31 @@ def cmd_dump(args: argparse.Namespace) -> int:
         return 0
 
     print(rendered)
+    return 0
+
+
+def cmd_clean(args: argparse.Namespace) -> int:
+    temp_dir = get_user_temp_dir()
+    if not temp_dir.is_dir():
+        print(f"Mimori cache directory {temp_dir} does not exist.")
+        return 0
+
+    if getattr(args, "all", False):
+        deleted = 0
+        freed = 0
+        for p in temp_dir.glob("ctx-*.md"):
+            try:
+                sz = p.stat().st_size
+                p.unlink(missing_ok=True)
+                deleted += 1
+                freed += sz
+            except OSError:
+                pass
+        print(f"Cleared all cached snapshots: {deleted} files removed ({format_bytes(freed)} freed) from {temp_dir}")
+        return 0
+
+    pruned_count, pruned_bytes = prune_user_temp_dir(temp_dir)
+    print(f"Pruned stale snapshots: {pruned_count} files removed ({format_bytes(pruned_bytes)} freed) from {temp_dir}")
     return 0
 
 
@@ -1564,6 +1713,71 @@ def _test_dump_file_and_git_init(root: Path) -> None:
         os.chdir(old_cwd)
 
 
+def _test_cache_pruning(root: Path) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        temp_dir = Path(td)
+        now = 1_000_000.0
+
+        # Create mock snapshots
+        # Repo A: 3 snapshots (1 very old: 100h ago, 2 recent: 2h and 1h ago)
+        f_a_old = temp_dir / "ctx-repoA-c1.md"
+        f_a_old.write_text("old snapshot", encoding="utf-8")
+        os.utime(f_a_old, (now - 100 * 3600, now - 100 * 3600))
+
+        f_a_mid = temp_dir / "ctx-repoA-c2.md"
+        f_a_mid.write_text("mid snapshot", encoding="utf-8")
+        os.utime(f_a_mid, (now - 2 * 3600, now - 2 * 3600))
+
+        f_a_new = temp_dir / "ctx-repoA-c3.md"
+        f_a_new.write_text("new snapshot", encoding="utf-8")
+        os.utime(f_a_new, (now - 1 * 3600, now - 1 * 3600))
+
+        # Repo B: 3 recent snapshots (30m, 20m, 10m ago) -> with max_per_repo=2, oldest should be pruned
+        f_b_1 = temp_dir / "ctx-repoB-c1.md"
+        f_b_1.write_text("b1 snapshot", encoding="utf-8")
+        os.utime(f_b_1, (now - 1800, now - 1800))
+
+        f_b_2 = temp_dir / "ctx-repoB-c2.md"
+        f_b_2.write_text("b2 snapshot", encoding="utf-8")
+        os.utime(f_b_2, (now - 1200, now - 1200))
+
+        f_b_3 = temp_dir / "ctx-repoB-c3.md"
+        f_b_3.write_text("b3 snapshot", encoding="utf-8")
+        os.utime(f_b_3, (now - 600, now - 600))
+
+        pruned_count, pruned_bytes = prune_user_temp_dir(
+            temp_dir=temp_dir,
+            max_per_repo=2,
+            ttl_hours=72,
+            max_files=50,
+            now=now,
+        )
+
+        assert pruned_count == 2, f"expected 2 files pruned (1 expired TTL + 1 excess in repoB), got {pruned_count}"
+        assert not f_a_old.exists(), "f_a_old should be pruned due to TTL > 72h"
+        assert f_a_mid.exists(), "f_a_mid should be kept"
+        assert f_a_new.exists(), "f_a_new should be kept"
+        assert not f_b_1.exists(), "f_b_1 should be pruned due to max_per_repo=2"
+        assert f_b_2.exists(), "f_b_2 should be kept"
+        assert f_b_3.exists(), "f_b_3 should be kept"
+
+        # Test global max files ceiling
+        for i in range(5):
+            f_extra = temp_dir / f"ctx-repoExtra{i}-c.md"
+            f_extra.write_text("extra", encoding="utf-8")
+            os.utime(f_extra, (now - 500 + i * 10, now - 500 + i * 10))
+
+        pruned_count2, _ = prune_user_temp_dir(
+            temp_dir=temp_dir,
+            max_per_repo=10,
+            ttl_hours=72,
+            max_files=5,
+            now=now,
+        )
+        remaining_count = len(list(temp_dir.glob("ctx-*.md")))
+        assert remaining_count == 5, f"expected 5 files remaining after max_files=5, got {remaining_count}"
+
+
 def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir).resolve()
@@ -1577,6 +1791,7 @@ def run_self_test() -> int:
         _test_git_integration(root)
         _test_dump_is_live(root)
         _test_dump_file_and_git_init(root)
+        _test_cache_pruning(root)
     print("Self-test passed successfully.")
     return 0
 
@@ -1620,6 +1835,9 @@ def main() -> int:
     hist_parser = subparsers.add_parser("history", help="Show recent logged agent actions")
     hist_parser.add_argument("--limit", type=int, default=10, help="Number of records to show (default: 10)")
 
+    clean_parser = subparsers.add_parser("clean", help="Clean stale or expired context snapshots from user temp directory")
+    clean_parser.add_argument("--all", action="store_true", help="Remove all cached context snapshots unconditionally")
+
     args = parser.parse_args()
 
     if args.test:
@@ -1635,6 +1853,7 @@ def main() -> int:
         "dump": cmd_dump,
         "log": cmd_log,
         "history": cmd_history,
+        "clean": cmd_clean,
     }
     return handlers[args.command](args)
 

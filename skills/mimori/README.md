@@ -28,6 +28,9 @@
 5. **Debt Ledger Integration**:
    - Tracks open `# ponytail:` deferral comments and technical debt directly in `.mimori/memory.md`.
 
+6. **Self-Cleaning Temp Cache (`mimori clean`)**:
+   - Opportunistic in-flight garbage collection on `dump --file`: retains the 2 newest snapshots per repo, auto-expires files older than 72h, and caps total temp files.
+
 ---
 
 ## 🚀 Quickstart
@@ -50,6 +53,10 @@ mimori log --action "add-auth" --summary "Added JWT auth middleware" --files "au
 
 # View recent session history
 mimori history --limit 5
+
+# Prune stale snapshot caches or wipe entirely
+mimori clean
+mimori clean --all
 ```
 
 ---

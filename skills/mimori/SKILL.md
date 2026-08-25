@@ -104,3 +104,26 @@ To inspect recent activities across sessions:
 ```bash
 mimori history --limit 5
 ```
+
+## 5. Cache Management & Garbage Collection
+
+Context snapshots generated via `mimori dump --file` are stored in the user runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`).
+
+### Automatic In-Flight Pruning
+On every `mimori dump --file` execution, `mimori` automatically performs opportunistic non-blocking garbage collection:
+- **Per-Repo LRU Retention**: Retains only the **2 most recent snapshots** per repository (`ctx-<repo>-<commit>.md`), deleting older commit snapshots for that repo.
+- **Global TTL**: Any snapshot older than **72 hours (3 days)** is automatically removed across all repos.
+- **Global Safety Cap**: Keeps at most **50 snapshots** total, purging oldest first.
+
+### Environment Overrides
+- `MIMORI_CACHE_MAX_PER_REPO`: Max snapshots per repository (default: `2`).
+- `MIMORI_CACHE_TTL_HOURS`: Snapshot expiry in hours (default: `72.0`).
+- `MIMORI_CACHE_MAX_FILES`: Max total snapshot files in cache (default: `50`).
+
+### Manual Cleanup Command
+To manually prune expired snapshots or wipe the cache:
+
+```bash
+mimori clean        # Prune expired and stale snapshots according to retention policy
+mimori clean --all  # Immediately purge all cached snapshots in temp directory
+```
