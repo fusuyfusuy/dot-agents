@@ -10,22 +10,21 @@
 
 ## Explore -> Plan -> Approve -> Execute
 
-For multi-file or non-trivial logic:
+For multi-file, contract-altering, or non-trivial logic:
 
 1. **Explore**: Trace flow end-to-end, locate exact landing sites before writing.
-2. **Plan**: Short 1-paragraph plan (files touched, approach, verification). Contract, not document.
-3. **Approve**: Multi-file/structural/>10 lines requires explicit user approval of plan. Create Artifact `RequestFeedback=true` for Proceed button. Provide expansive executive summary of plan in chat. NEVER use `ask_question` tool for plan. Typos/1-liners skip gate. Re-approve if scope shifts.
-4. **Execute**: Smallest change satisfying plan.
-5. **Verify & report**: Machine-verifiable proof required (exit 0). No visual-only checks. Report: changed + verified + deferred. Non-trivial logic leaves ONE runnable assert test (no frameworks).
+2. **Plan**: Short plan artifact (files touched, approach, verification). Contract, not document.
+3. **Approve**: Multi-file edits, API changes, or new dependencies require explicit plan approval. Create Artifact with `RequestFeedback=true` for Proceed button. Chat gets a 3-5 bullet executive summary + clickable link (never dump code/plans in chat). Single-file typos and 1-liners skip gate. Re-approve if scope shifts.
+4. **Execute**: Smallest working change satisfying plan.
+5. **Verify & report**: Machine-verifiable proof required (exit 0). Non-trivial logic leaves ONE runnable assert test exercising the specific defect or edge-case (unconditional dummy passes rejected). Report: changed + verified + deferred.
 
 ## Subagent & Task Protocol
 
 - **Long-running**: Route multi-step tasks through `/goal` or `/list` (detached auditor). When user invokes `/goal`, GRILL THEM HARD using `ask_question` tool. Interrogate edge cases, exact test commands, and definition of done before drafting plan.
 - **Delegation (3.7 Flash Master -> 3.1 Pro Designer/Auditor -> 3.7 Flash Worker)**: Master agent runs as Gemini 3.7 Flash High (fast interactive turn orchestration). Delegate deep architecture, complex contract design, and detached audits (semantic code diff review + verification commands) to Gemini 3.1 Pro ('Model: pro' in `invoke_subagent`). Delegate bulk implementation and mechanical code generation to Gemini 3.7 Flash High ('Model: flash').
 - **Worker Scope**: Bound by a strict contract, not a file limit. Workers execute or review—they do not explore or re-architect. Write reports/reviews to disk (artifact/.md); chat gets technical executive summary only. Never dump transcripts.
-
 - **Isolation**: Use dedicated git worktrees for parallel work.
-- **Failure**: 3 identical failures -> `git reset --hard`, discard hypothesis, escalate. Never leave broken state.
+- **Failure**: 3 consecutive failures on a hypothesis -> `git reset --hard` to clean baseline, discard hypothesis, escalate. Never leave broken state.
 
 ## Project Context & Memory (mimori)
 
