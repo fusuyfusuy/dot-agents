@@ -30,7 +30,8 @@ For multi-file or non-trivial logic:
 ## Project Context & Memory (mimori)
 
 - **Session Start / Warmup**: Run `mimori dump --file` & view output file (live PageRank symbol map + memory + ADRs + tasks in user-isolated temp). For full uncapped map: `mimori map --stdout`. Never read `.mimori/repo_map.md` directly.
-- **Task Tracking & Completion**: Track pending/in-flight tasks with `mimori todo` / `mimori idea`. Log completed milestones with `mimori log --action <act> --summary <1-line-caveman> --files <f1,f2>`. Update `.mimori/memory.md` (invariants/gotchas) & `.mimori/decisions.md` (ADRs).
+- **Task Tracking**: Track pending/in-flight tasks with `mimori todo` / `mimori idea`.
+- **Milestone Logging**: Log completed milestones with `mimori log --action <act> --summary <1-line-caveman> --files <f1,f2>`. Update `.mimori/memory.md` (invariants/gotchas) & `.mimori/decisions.md` (ADRs).
 - **Resume**: Check `git status` + `mimori history --limit 5` + `mimori todo`.
 
 ## Think in Code — Compute, Don't Read
@@ -54,21 +55,15 @@ Best code is code never written. Climb ladder before writing code:
 6. One line? Make it one line.
 7. Only then: write minimum code that works.
 
-Fix root cause, not symptom: grep all callers of touched function, fix shared helper once. Deletion over addition. Boring over clever. Mark deliberate deferrals with `# ponytail: <ceiling & upgrade trigger>`.
+Fix root cause, not symptom: grep all callers of touched function, fix shared helper once. Deletion over addition. Boring over clever. Mark deliberate deferrals with `# ponytail: <what> <- <ceiling> -> <upgrade trigger>`.
 
 ## Debt Ledger
 
-Open unfinished work lives in the project's `.mimori/memory.md` under
-`## KNOWN DEBT` (mimori projects), surfaced automatically by
-`mimori dump` at session start.
+Open unfinished work lives in code as `# ponytail:` markers and syncs to `.mimori/memory.md` under `## KNOWN DEBT` (cap ~30 lines):
 
-- One line per item: `what <- why still open -> fix-trigger`. OPEN items ONLY.
-- Learn debt same session -> add it that session. Fix debt -> DELETE the line.
-  Never mark done in place — the ledger holds open only.
-- Operator says no / defers -> waiver entry in `.mimori/decisions.md`; a waived
-  item is never re-proposed or re-flagged.
-- Editing code next to a debt line? Fix it in the same change, or leave a
-  `# ponytail:` note naming the ceiling and upgrade trigger — plus its ledger line.
-- Cap ~30 lines. Past the cap: fix or delete the oldest before adding.
-- Deliberate gaps get ledger lines too (`accepted ...:`) so "chose not to"
-  never looks like "forgot".
+- **Format**: `what <- ceiling -> upgrade trigger`. OPEN items ONLY.
+- **Auto-Sync**: Run `mimori debt sync` to reconcile in-code markers into `.mimori/memory.md`. Pruned code markers are automatically deleted from ledger.
+- **Manual Waivers**: Deliberate architectural gaps without in-code markers start with `accepted ...` and are preserved during sync.
+- **CI Gate**: Run `mimori debt check` to ensure every marker has a concrete trigger.
+- **Decision Waiver**: Operator says no / defers -> waiver entry in `.mimori/decisions.md`; a waived item is never re-proposed.
+
