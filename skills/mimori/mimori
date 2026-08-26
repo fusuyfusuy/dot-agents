@@ -12,10 +12,15 @@ import ast
 import concurrent.futures
 import contextlib
 import datetime
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,9 +32,16 @@ except ModuleNotFoundError:
         import tomli as tomllib
     except ModuleNotFoundError:
         tomllib = None
+try:
+    import tree_sitter
+except ImportError:
+    tree_sitter = None  # type: ignore
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+AST_GREP_BIN: Optional[str] = shutil.which("ast-grep")
+TREE_SITTER_BIN: Optional[str] = shutil.which("tree-sitter")
 
 # Used only when the repo is not a git checkout; inside git, `git ls-files` is
 # the authority on what is visible (it implements .gitignore correctly).
@@ -39,14 +51,14 @@ DEFAULT_IGNORES = {
     ".idea", ".vscode", ".next", ".turbo", ".gemini", ".antigravity",
 }
 
-CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".c", ".cpp", ".h"}
+CODE_EXTS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".c", ".cpp", ".h", ".rb"}
 JS_EXTS = (".ts", ".tsx", ".js", ".jsx")
 # Deliberately excludes index.{ts,js}: those are usually barrel re-export hubs, the
 # opposite of an entry point. A real package entry is declared in package.json and
 # picked up by detect_entry_points instead.
 ENTRY_NAMES = {
     "main.py", "__main__.py", "app.py", "cli.py", "manage.py", "server.py",
-    "main.go", "main.rs",
+    "main.go", "main.rs", "main.rb", "app.rb", "config.ru",
 }
 # Next.js / Remix style file-system routing: these *are* the app's entry points.
 ROUTE_STEMS = {"page", "layout", "route"}
@@ -125,6 +137,60 @@ DEFAULT_TASKS_TEMPLATE = """# Tasks & Backlog
 
 ## Completed
 """
+
+
+# --------------------------------------------------------------------------
+# concurrency & atomic file operations
+# --------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def file_lock(lock_path: Path, timeout: float = 10.0):
+    """Advisory file lock using fcntl.flock on POSIX; graceful no-op if fcntl unavailable."""
+    if fcntl is None:
+        yield
+        return
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = None
+    try:
+        f = open(lock_path, "a")
+        start = time.time()
+        while True:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.time() - start > timeout:
+                    break
+                time.sleep(0.05)
+        yield
+    finally:
+        if f is not None:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                f.close()
+            except OSError:
+                pass
+
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8", lock: bool = True) -> None:
+    """Atomically write text to path using a temporary file and os.replace, with optional advisory locking."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = path.with_name(f"{path.name}.lock")
+    cm = file_lock(lock_file) if lock else contextlib.nullcontext()
+    with cm:
+        tmp_file = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:6]}")
+        try:
+            tmp_file.write_text(content, encoding=encoding)
+            os.replace(tmp_file, path)
+        finally:
+            if tmp_file.exists():
+                try:
+                    tmp_file.unlink()
+                except OSError:
+                    pass
 
 
 # --------------------------------------------------------------------------
@@ -527,6 +593,11 @@ GENERIC_PATTERNS = {
     ".c": [r"^[A-Za-z0-9_ *]+\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{"],
     ".cpp": [r"^(?:class|struct)\s+([A-Za-z0-9_]+)", r"^[A-Za-z0-9_ *:]+\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{"],
     ".h": [r"^(?:class|struct)\s+([A-Za-z0-9_]+)", r"^[A-Za-z0-9_ *:]+\s+([A-Za-z0-9_]+)\s*\([^)]*\);"],
+    ".rb": [
+        r"^\s*class\s+([A-Za-z0-9_:]+)",
+        r"^\s*module\s+([A-Za-z0-9_:]+)",
+        r"^\s*def\s+([A-Za-z0-9_?!]+)",
+    ],
 }
 
 JS_IMPORT_RE = re.compile(r"""(?:from|require\(|import\()\s*['"]([^'"]+)['"]""")
@@ -535,6 +606,7 @@ GO_IMPORT_BLOCK_RE = re.compile(r"""import\s*\(([^)]+)\)""", re.S)
 GO_SINGLE_IMPORT_RE = re.compile(r"""import\s+(?:[a-zA-Z0-9_.]+\s+)?["']([^"']+)["']""")
 RUST_MOD_RE = re.compile(r"""^\s*(?:pub\s+)?mod\s+([a-zA-Z0-9_]+)\s*;""")
 RUST_USE_RE = re.compile(r"""^\s*(?:pub\s+)?use\s+([a-zA-Z0-9_:]+)""")
+RUBY_REQUIRE_RE = re.compile(r"""^\s*(?:require|require_relative)\s+['"]([^'"]+)['"]""")
 
 
 def parse_generic(content: str, ext: str) -> Tuple[Optional[str], List[Tuple[int, int, str]], List[tuple]]:
@@ -559,6 +631,10 @@ def parse_generic(content: str, ext: str) -> Tuple[Optional[str], List[Tuple[int
             m_use = RUST_USE_RE.match(line)
             if m_use:
                 imports.append(("rs_use", m_use.group(1)))
+        elif ext == ".rb":
+            m_req = RUBY_REQUIRE_RE.match(line)
+            if m_req:
+                imports.append(("rb_req", m_req.group(1)))
 
         for c in regexes:
             if c.match(line):
@@ -567,7 +643,7 @@ def parse_generic(content: str, ext: str) -> Tuple[Optional[str], List[Tuple[int
     return None, symbols, imports
 
 
-SHEBANG_EXTS = {"python": ".py", "node": ".js", "deno": ".ts", "bun": ".ts"}
+SHEBANG_EXTS = {"python": ".py", "node": ".js", "deno": ".ts", "bun": ".ts", "ruby": ".rb"}
 
 
 def _sniff_shebang(full: Path) -> Optional[str]:
@@ -583,6 +659,141 @@ def _sniff_shebang(full: Path) -> Optional[str]:
         if name in first:
             return ext
     return None
+
+
+_TS_LANGUAGE_MAP = {
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".go": "go",
+    ".rs": "rust",
+    ".rb": "ruby",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".h": "c",
+}
+
+_TS_PARSERS: Dict[str, Any] = {}
+
+
+def _get_tree_sitter_parser(ext: str) -> Optional[Any]:
+    if tree_sitter is None:
+        return None
+    lang_name = _TS_LANGUAGE_MAP.get(ext)
+    if not lang_name:
+        return None
+    if lang_name in _TS_PARSERS:
+        return _TS_PARSERS[lang_name]
+
+    try:
+        mod_name = f"tree_sitter_{lang_name}"
+        lang_mod = __import__(mod_name)
+        lang_func = getattr(lang_mod, f"language_{lang_name}", getattr(lang_mod, "language", None))
+        if callable(lang_func):
+            lang = tree_sitter.Language(lang_func())
+            parser = tree_sitter.Parser(lang)
+            _TS_PARSERS[lang_name] = parser
+            return parser
+    except Exception:
+        pass
+    _TS_PARSERS[lang_name] = None
+    return None
+
+
+def parse_tree_sitter(content: str, ext: str) -> Optional[Tuple[Optional[str], List[Tuple[int, int, str]], List[tuple]]]:
+    parser = _get_tree_sitter_parser(ext)
+    if parser is None:
+        return None
+    try:
+        tree = parser.parse(bytes(content, "utf-8"))
+        symbols: List[Tuple[int, int, str]] = []
+        imports: List[tuple] = []
+
+        cursor = tree.walk()
+        visited_children = False
+        while True:
+            if not visited_children:
+                node = cursor.node
+                if node.type in ("class_declaration", "class_definition", "struct_item", "interface_declaration", "type_declaration"):
+                    name_node = node.child_by_field_name("name")
+                    if name_node:
+                        symbols.append((node.start_point.row + 1, 0, f"class {name_node.text.decode('utf-8', errors='ignore')}"))
+                elif node.type in ("function_declaration", "function_definition", "method_definition", "function_item", "method_declaration"):
+                    name_node = node.child_by_field_name("name")
+                    if name_node:
+                        symbols.append((node.start_point.row + 1, 0, f"func {name_node.text.decode('utf-8', errors='ignore')}"))
+                elif node.type in ("import_statement", "import_declaration", "use_declaration"):
+                    source_node = node.child_by_field_name("source") or node.child_by_field_name("argument")
+                    if source_node:
+                        spec = source_node.text.decode("utf-8", errors="ignore").strip("\"'")
+                        if ext in JS_EXTS:
+                            imports.append(("js_spec", spec))
+                        elif ext == ".go":
+                            imports.append(("go_spec", spec))
+
+                if cursor.goto_first_child():
+                    continue
+            if cursor.goto_next_sibling():
+                visited_children = False
+                continue
+            if not cursor.goto_parent():
+                break
+            visited_children = True
+
+        if symbols or imports:
+            return None, symbols, imports
+    except Exception:
+        pass
+    return None
+
+
+def parse_ast_grep(full_path: Path, ext: str) -> Optional[Tuple[Optional[str], List[Tuple[int, int, str]], List[tuple]]]:
+    if not AST_GREP_BIN or not full_path.is_file():
+        return None
+    try:
+        cmd = [AST_GREP_BIN, "run", "--pattern", "$$$", "--json", str(full_path)]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            matches = json.loads(res.stdout)
+            if isinstance(matches, list) and matches:
+                symbols: List[Tuple[int, int, str]] = []
+                imports: List[tuple] = []
+                for m in matches:
+                    text = m.get("text", "").strip()
+                    first_line = text.splitlines()[0].strip() if text else ""
+                    line_no = m.get("range", {}).get("start", {}).get("line", 0) + 1
+                    
+                    if first_line.startswith("//") or first_line.startswith("/*") or first_line.startswith("#"):
+                        continue
+
+                    if any(first_line.startswith(k) for k in ("export class", "class ", "export interface", "interface ", "export type", "type ", "pub struct", "struct ", "pub trait", "trait ", "pub fn", "fn ", "func ", "def ", "module ")):
+                        clean_sig = _elide(first_line.rstrip("{ ").strip(), 88)
+                        symbols.append((line_no, 0, clean_sig))
+
+                    if "from " in text or "import " in text or "require(" in text:
+                        for spec in JS_IMPORT_RE.findall(text):
+                            imports.append(("js_spec", spec))
+
+                if symbols or imports:
+                    return None, symbols, imports
+    except Exception:
+        pass
+    return None
+
+
+def parse_polyglot(content: str, ext: str, full_path: Optional[Path] = None) -> Tuple[Optional[str], List[Tuple[int, int, str]], List[tuple]]:
+    """Opportunistic polyglot AST parser. Uses tree-sitter/ast-grep if installed, else pure stdlib regex."""
+    if os.environ.get("MIMORI_FORCE_REGEX"):
+        return parse_generic(content, ext)
+    res = parse_tree_sitter(content, ext)
+    if res is not None:
+        return res
+    if full_path:
+        res = parse_ast_grep(full_path, ext)
+        if res is not None:
+            return res
+    return parse_generic(content, ext)
 
 
 def analyze_file(root: Path, rel: str) -> Optional[FileInfo]:
@@ -609,7 +820,7 @@ def analyze_file(root: Path, rel: str) -> Optional[FileInfo]:
     if ext == ".py":
         info.doc, info.symbols, info.imports = parse_python(content)
     else:
-        info.doc, info.symbols, info.imports = parse_generic(content, ext)
+        info.doc, info.symbols, info.imports = parse_polyglot(content, ext, full)
     return info
 
 
@@ -832,6 +1043,18 @@ def build_import_graph(infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]]
                     parts = use_path[7:].split("::")
                     stem = "/".join(parts)
                     for cand in (f"src/{stem}.rs", f"src/{stem}/mod.rs", f"{stem}.rs", f"{stem}/mod.rs"):
+                        norm = os.path.normpath(cand)
+                        if norm in paths and norm != source:
+                            target = norm
+                            break
+            elif spec[0] == "rb_req":
+                rb_spec = spec[1]
+                if rb_spec.startswith("."):
+                    target = _resolve_rel_path(source, rb_spec, paths)
+                    if not target:
+                        target = _resolve_rel_path(source, rb_spec + ".rb", paths)
+                else:
+                    for cand in (f"{rb_spec}.rb", f"lib/{rb_spec}.rb", f"app/{rb_spec}.rb", f"{rb_spec}"):
                         norm = os.path.normpath(cand)
                         if norm in paths and norm != source:
                             target = norm
@@ -1591,7 +1814,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     ):
         target = mimori_dir / name
         if not target.exists():
-            target.write_text(template, encoding="utf-8")
+            atomic_write_text(target, template, encoding="utf-8")
             print(f"Created {target.relative_to(root)}")
         else:
             print(f"Already exists: {target.relative_to(root)}")
@@ -1602,7 +1825,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"Created {act_file.relative_to(root)}")
 
     map_file = mimori_dir / "repo_map.md"
-    map_file.write_text(generate_repo_map(root), encoding="utf-8")
+    atomic_write_text(map_file, generate_repo_map(root), encoding="utf-8")
     print(f"Generated {map_file.relative_to(root)}")
     print("Initialization complete.")
     return 0
@@ -1619,7 +1842,7 @@ def cmd_map(args: argparse.Namespace) -> int:
         mimori_dir = get_mimori_dir(root)
         mimori_dir.mkdir(exist_ok=True)
         map_file = mimori_dir / "repo_map.md"
-        map_file.write_text(map_content, encoding="utf-8")
+        atomic_write_text(map_file, map_content, encoding="utf-8")
         print(f"Updated {map_file.relative_to(root)}")
     return 0
 
@@ -1640,8 +1863,10 @@ def cmd_log(args: argparse.Namespace) -> int:
         "author": os.environ.get("AGENT_NAME", "agent"),
     }
 
-    with open(act_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+    lock_file = act_file.with_name("activity.jsonl.lock")
+    with file_lock(lock_file):
+        with open(act_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
     print(f"Logged action '{args.action}' to {act_file.relative_to(root)}")
     if len(args.summary) > ACTIVITY_SUMMARY_LIMIT:
         print(f"Note: summary is {len(args.summary)} chars — dump's Recent Activity elides past "
@@ -1838,7 +2063,7 @@ def cmd_dump(args: argparse.Namespace) -> int:
             dest_file = Path(out_target).resolve()
             dest_file.parent.mkdir(parents=True, exist_ok=True)
 
-        dest_file.write_text(rendered, encoding="utf-8")
+        atomic_write_text(dest_file, rendered, encoding="utf-8", lock=False)
         print(f"Wrote context snapshot to {dest_file}")
         return 0
 
@@ -1892,7 +2117,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
     if not tasks_file.exists():
         if action == "add":
             ensure_git_repo(root)
-            tasks_file.write_text(DEFAULT_TASKS_TEMPLATE, encoding="utf-8")
+            atomic_write_text(tasks_file, DEFAULT_TASKS_TEMPLATE, encoding="utf-8")
         else:
             print(f"No tasks tracked yet in {mimori_dir.relative_to(root)}/tasks.md.")
             print("Run 'mimori init' or 'mimori todo add <description>' to start tracking tasks.")
@@ -2016,7 +2241,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
             tags=tags,
         )
         sections[s_idx][1].append(new_item)
-        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
         all_tasks = get_all_tasks(sections)
         print(f"Added task #{new_item.index} to {sections[s_idx][0].lstrip('#').strip()}: {new_item.text}")
         return 0
@@ -2033,7 +2258,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
         task.section_idx = dest_idx
         task.section_name = sections[dest_idx][0]
         sections[dest_idx][1].append(task)
-        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
         print(f"Started task #{task.index}: {task.text} (moved to In Progress)")
         return 0
 
@@ -2049,7 +2274,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
         task.section_idx = dest_idx
         task.section_name = sections[dest_idx][0]
         sections[dest_idx][1].append(task)
-        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
         print(f"Completed task #{task.index}: {task.text} (moved to Completed)")
         return 0
 
@@ -2065,7 +2290,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
         task.section_idx = dest_idx
         task.section_name = sections[dest_idx][0]
         sections[dest_idx][1].append(task)
-        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
         print(f"Reopened task #{task.index}: {task.text} (moved to Active Tasks)")
         return 0
 
@@ -2075,7 +2300,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
             print(f"Error: {err}")
             return 1
         sections[task.section_idx][1].remove(task)
-        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
         print(f"Removed task #{task.index}: {task.text}")
         return 0
 
@@ -2113,7 +2338,7 @@ def cmd_idea(args: argparse.Namespace) -> int:
         task.section_idx = dest_idx
         task.section_name = sections[dest_idx][0]
         sections[dest_idx][1].append(task)
-        tasks_file.write_text(serialize_tasks_document(preamble, sections), encoding="utf-8")
+        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
         print(f"Promoted idea #{task.index} to Active Tasks: {task.text}")
         return 0
     elif action in ("rm", "remove"):
@@ -2371,7 +2596,7 @@ def cmd_debt(args: argparse.Namespace) -> int:
         else:
             updated_lines = lines + ["", "---", ""] + new_debt_lines
 
-        mem_file.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+        atomic_write_text(mem_file, "\n".join(updated_lines) + "\n", encoding="utf-8")
         print(f"Synchronized {len(items)} ponytail debt markers into .mimori/memory.md (## KNOWN DEBT).")
         return 0
 
@@ -2421,6 +2646,12 @@ def _build_fixture(root: Path) -> None:
     (root / "src" / "app" / "layout.tsx").write_text(
         'import { shared } from "@/shared";\nexport default function Layout() {}\n'
     )
+    (root / "src" / "ruby_app.rb").write_text(
+        "require_relative './ruby_helper'\n\nclass RubyApp\n  def perform_task(arg)\n  end\nend\n"
+    )
+    (root / "src" / "ruby_helper.rb").write_text(
+        "module RubyHelper\n  def helper_util\n  end\nend\n"
+    )
     (root / ".mimori" / "memory.md").write_text(DEFAULT_MEMORY_TEMPLATE)
     (root / ".mimori" / "decisions.md").write_text(DEFAULT_DECISIONS_TEMPLATE)
     (root / ".mimori" / "tasks.md").write_text(DEFAULT_TASKS_TEMPLATE)
@@ -2447,6 +2678,8 @@ def _test_symbols_and_graph(root: Path) -> None:
     assert "_private" not in content, "private methods should be filtered out"
     assert "export function startServer" in content, "generic-language symbols should appear"
     assert '"Core engine for the fixture."' in content, "module docstring should be surfaced"
+    assert "class RubyApp" in content, "ruby classes should appear"
+    assert "module RubyHelper" in content, "ruby modules should appear"
 
     core_line = next(l for l in content.splitlines() if l.startswith("`src/core.py`"))
     assert ":2 " in content and ":8 " in content, f"line numbers must be emitted:\n{content}"
@@ -2466,6 +2699,9 @@ def _test_symbols_and_graph(root: Path) -> None:
         f"tsconfig path aliases (@/x) must produce graph edges, got: {shared_line}"
     assert "export default function Page" in content, \
         "`export default function` (the Next.js page form) must be captured as a symbol"
+
+    ruby_helper_line = next(l for l in content.splitlines() if l.startswith("`src/ruby_helper.rb`"))
+    assert "ruby_app" in ruby_helper_line, f"ruby require_relative must produce graph edges, got: {ruby_helper_line}"
 
     entry_block = content.split("## Core modules")[0]
     assert "src/app/dash/page.tsx" in entry_block and "src/app/layout.tsx" in entry_block, \
@@ -3010,6 +3246,43 @@ def _test_debt_system(root: Path) -> None:
         globals()["find_repo_root"] = orig_find_repo_root
 
 
+def _test_atomic_locking_and_concurrency(root: Path) -> None:
+    test_dir = root / "concurrency_test"
+    test_dir.mkdir(exist_ok=True)
+    ensure_git_repo(test_dir)
+    mimori_dir = test_dir / ".mimori"
+    mimori_dir.mkdir(exist_ok=True)
+    act_file = mimori_dir / "activity.jsonl"
+
+    orig_find_repo_root = globals()["find_repo_root"]
+    globals()["find_repo_root"] = lambda: test_dir
+    try:
+        def log_worker(i: int):
+            args = argparse.Namespace(
+                action=f"action-{i}",
+                summary=f"Worker {i} logged work",
+                files=f"file_{i}.py",
+            )
+            return cmd_log(args)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(log_worker, range(20)))
+
+        assert all(r == 0 for r in results), "All concurrent log calls must succeed"
+        assert act_file.exists()
+        lines = act_file.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 20, f"Expected 20 atomic log records without interlacing, got {len(lines)}"
+        parsed = [json.loads(l) for l in lines]
+        assert len(parsed) == 20, "All logged records must parse as valid JSON"
+
+        # Test atomic file write
+        sample_file = test_dir / "sample.txt"
+        atomic_write_text(sample_file, "hello atomic world", encoding="utf-8")
+        assert sample_file.read_text(encoding="utf-8") == "hello atomic world"
+    finally:
+        globals()["find_repo_root"] = orig_find_repo_root
+
+
 def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir).resolve()
@@ -3029,6 +3302,7 @@ def run_self_test() -> int:
         _test_polyglot_graph(root)
         _test_staleness_scanner(root)
         _test_debt_system(root)
+        _test_atomic_locking_and_concurrency(root)
     print("Self-test passed successfully.")
     return 0
 

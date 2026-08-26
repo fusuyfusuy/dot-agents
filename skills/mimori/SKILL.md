@@ -1,181 +1,219 @@
 ---
 name: mimori
-description: Zero-daemon project memory, structural symbol mapping, and activity tracking CLI (`mimori`). Use at the start of any session to inspect repo structure and architecture invariants without costly exploratory searches, and use at completion to record architecture decisions and log tasks.
+description: Zero-daemon project memory, structural symbol mapping, and activity tracking CLI (`mimori`). Use at session start for instant orientation and at completion for logging decisions and tasks.
 ---
 
-# Agent Context & Memory (mimori)
+# mimori
 
-`mimori` provides zero-daemon project memory, AST repository mapping, and session activity tracking stored directly within `.mimori/` inside the target workspace.
+Zero-daemon agent context, AST symbol mapping, and activity tracking CLI stored in `.mimori/`. Standard library only.
 
-## 1. Fast Warmup / Startup
+## 1. Quick Reference & Triggers
 
-Run this first, before any broad grepping or directory crawling:
+| Action | Command | When to Use |
+| :--- | :--- | :--- |
+| **Warmup Snapshot** | `mimori dump --file` | Session start, subagent kickoff, pre-refactor orientation. |
+| **Direct Dump Output** | `mimori dump` | Pipe full context directly to stdout without writing file. |
+| **Print Structural Map** | `mimori map --stdout` | Inspect ranked symbols, callers, and import graph in terminal. |
+| **Save Structural Map** | `mimori map` | Update `.mimori/repo_map.md` on disk for external tools. |
+| **Initialize Workspace** | `mimori init` | First-time project setup; scaffolds `.mimori/` directory. |
+| **List Tasks** | `mimori todo` | Review active tasks, in-progress items, and backlog. |
+| **Add Task** | `mimori todo add "<task>"` | Track new discrete unit of work. |
+| **Update Task State** | `mimori todo start <id>` / `done <id>` | Mark item active `[/]`, complete `[x]`, reopen `[ ]`, or rm. |
+| **Track Future Ideas** | `mimori idea add "<idea>"` | Store backlog ideas `[?]` without cluttering active todo. |
+| **Promote Idea** | `mimori idea promote <id>` | Move backlog idea into active tasks `[ ]`. |
+| **Audit Ponytail Debt** | `mimori debt` | List all in-code `# ponytail:` / `// ponytail:` markers. |
+| **Sync Debt Ledger** | `mimori debt sync` | Reconcile in-code markers into `.mimori/memory.md` (`## KNOWN DEBT`). |
+| **Validate Debt CI** | `mimori debt check` | Exit 0 if all markers have valid triggers, exit 1 if malformed. |
+| **Log Work Done** | `mimori log --action <a> --summary <s>` | Task milestone completion; records to `activity.jsonl`. |
+| **View History** | `mimori history --limit <N>` | Audit recent cross-session activity log entries. |
+| **Prune Cache** | `mimori clean` / `mimori clean --all` | Prune expired snapshots in `$XDG_RUNTIME_DIR/mimori`. |
 
+---
+
+## 2. Session Warmup (`dump`)
+
+Generates unified context: working git state, project memory, decisions, tasks, ranked symbol map, recent activity.
+
+### Commands
 ```bash
+# Generate runtime file and print path (recommended)
 mimori dump --file
+
+# Print directly to stdout
+mimori dump
+
+# Focus on specific subsystem and its direct import graph neighbors
+mimori dump --focus "auth,api"
+mimori dump --file --focus "src/engine"
+
+# Adjust character budget
+mimori dump --budget default    # 24,000 chars (default)
+mimori dump --budget large      # 48,000 chars
+mimori dump --budget immense    # 96,000 chars
+mimori dump --budget unlimited  # No truncation
+mimori dump --budget 15000      # Custom character cap
 ```
-Then view the printed file path (e.g. `/run/user/1000/mimori/ctx-<repo>-<commit>.md`). If the workspace is not yet a git repository, `mimori` will automatically initialize one. Output files are isolated to the current user's runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`) and tagged by repository name and short commit ID so parallel agent sessions never clash.
 
-One call returns six things: **working state** (branch, uncommitted files, recent commits), **project memory**, **architecture decisions**, **tasks & backlog**, a **ranked symbol map**, and **recent activity**.
+### Environment Variables
+- `MIMORI_FOCUS`: Comma-separated list of keywords/paths to auto-focus without CLI flags.
+- `MIMORI_BUDGET`: Default budget override (`default`, `large`, `immense`, `unlimited`, or integer).
 
-The map is regenerated live on every call, so it never serves stale cached data. Read it as an *orientation* layer, not an index:
+### Degradation Priority Under Budget
+1. **Memory (`memory.md`)**: Invariants & gotchas kept first; epics truncated last.
+2. **Decisions (`decisions.md`)**: All titles listed; newest expanded; superseded never expanded.
+3. **Tasks (`tasks.md`)**: In-progress `[/]` and active `[ ]` prioritized; completed `[x]` collapsed to count.
+4. **Map (`repo_map.md`)**: Low-ranked files collapsed into directory counts.
+5. **Activity (`activity.jsonl`)**: Long summaries trimmed; oldest entries dropped with count note.
 
-- Files are ranked by import in-degree, recent commit churn, and entry-point detection — the top of the map is what matters in this repo, not what sorts first alphabetically.
-- `← cli, db, kb_engine` on a file means those modules import it. That is the one thing `Grep` cannot give you in a single call.
-- Symbols carry signatures and `:line` numbers, so you can `Read` with an offset instead of searching.
-- Output is capped by a character budget. When lower-ranked files are collapsed, the map **says so explicitly** and gives the counts — if it doesn't say it was truncated, you are seeing everything.
+---
 
-Still use `Glob`/`Grep` for exact locations, call sites, and anything below the top-level symbols. The map tells you *where to look*; it does not replace searching.
+## 3. Structural AST Map (`map`)
 
-To write a fresh copy of the map to `.mimori/repo_map.md` (for humans or other tools browsing the repo), or print it without writing:
+Extracts top-level symbols (classes, functions, methods, line numbers) and computes PageRank from import graph.
 
+### Commands
 ```bash
-mimori map
+# Print map to stdout
 mimori map --stdout
-```
 
-### Budget
+# Write map to .mimori/repo_map.md
+mimori map
 
-**`mimori map` is complete by default** — it writes `.mimori/repo_map.md` or stdout for browsing, which costs disk, not context. Measured on real repos a full map runs **~40 tokens per file**, so it stays cheap into the hundreds of files. Pass `--budget <chars|large|immense>` to cap it on a very large repo.
-
-**`mimori dump` stays budgeted** (24 000 chars by default), because that output is spent directly on context. Override per call with `--budget <chars|default|large|immense|unlimited>` or the `MIMORI_BUDGET` env var.
-
-Raising a budget costs **tokens, not time** — generation is flat regardless — and it saturates: past the point where every ranked file is already detailed, extra budget buys nothing. Reach for a bigger `dump` budget when orienting in an unfamiliar large repo; stay on `default` for routine work, since an oversized dump crowds the context it is meant to save.
-
-When a budget binds, degradation is by priority and nothing vanishes silently:
-
-- **Memory** keeps invariants and gotchas ahead of status/epics; an oversized top-priority section is truncated rather than dropped.
-- **Decisions** always list **every ADR title**, expanding bodies newest-first. An ADR marked `**Superseded by**: ...` is kept for history but never expanded, so the file can grow without the snapshot growing with it.
-- **Tasks & Backlog** prioritizes In-Progress `[/]` and Active `[ ]` tasks; Future Ideas `[?]` are included up to budget; Completed tasks `[x]` are collapsed to compact count summaries (`_N completed tasks hidden_`) so historical items never displace active context.
-- **Map** collapses lower-ranked files by directory and reports the counts. Files with no parsed symbols are always summarized this way rather than listed individually, even at an unlimited budget — they are grouped, not dropped.
-- **Recent Activity** (the last `mimori log` entries) is capped separately so a verbose logger can't starve the map's share: long summaries and file lists are elided per-entry, and entries are dropped oldest-first if they still don't fit, with a `_N of M entries shown_` note.
-
-### Focused Maps for a Task
-
-Give the map a task lens instead of a global ranking: files matching any focus substring render in full detail **together with their direct import-graph neighbors** (importers and imports); everything else collapses to a directory summary.
-
-```bash
+# Focus on specific files/modules + 1-hop dependencies
 mimori map --stdout --focus "auth.py,server"
-mimori dump --focus "src/engine"
-MIMORI_FOCUS="auth,api" mimori dump
+
+# Output as JSON
+mimori map --stdout --format json
 ```
 
-Use it on large repos when you already know the area of a task — it is the cheap, task-conditioned substitute for a global dump. Budget rules still apply; truncation is still announced.
+### Supported Languages & Parsers
+- **Python**: Native `ast` parser (classes, methods, functions, signatures, docstrings, imports).
+- **Polyglot (TS, JS, Go, Rust, Ruby, C, C++)**:
+  - **Tier 1 (tree-sitter)**: Used automatically if `tree_sitter` Python module or CLI is installed.
+  - **Tier 2 (ast-grep)**: Used automatically if `ast-grep` binary is in `$PATH`.
+  - **Tier 3 (Pure Stdlib Fallback)**: Built-in regex heuristics used when external engines are absent. Zero runtime dependencies required.
 
-**New agents (fresh sessions, subagents) get focus automatically** when `MIMORI_FOCUS` is exported in the shell they launch from: the standard warmup `mimori dump` then produces a focused map without any extra flag. For a one-off child, pass `--focus` explicitly in the subagent's task text instead.
+### Ranking Factors
+- Import in-degree (how many files import this file).
+- PageRank score (vectorized pure-Python graph iteration).
+- 90-day git churn (frequently edited files score higher).
+- Entry-point heuristic (`main.*`, `index.*`, `cli.*`, `app.*`).
 
-## 2. Initialize a Project
+---
 
-To set up the `.mimori/` directory structure (`memory.md`, `decisions.md`, `tasks.md`, `repo_map.md`, `activity.jsonl`) in a new or existing repository:
+## 4. Tasks & Backlog (`todo` / `idea`)
 
+Zero-daemon task tracking stored in `.mimori/tasks.md`.
+
+### Task Commands (`todo`)
 ```bash
-mimori init
-```
-
-## 3. Persistent Memory & Architectural Decisions
-
-- **`.mimori/memory.md`**: Update when discovering non-obvious domain rules, active epic milestones, or subtle edge-case gotchas.
-- **`.mimori/decisions.md`**: Record new ADRs (*Context*, *Decision*, *Consequences*) when introducing new architectural patterns.
-- **`.mimori/tasks.md`**: Track in-progress tasks, pending todos, and future ideas/backlog.
-
-### Writing style: caveman
-
-`memory.md`, `decisions.md`, and `log --summary` get scanned fast at session start — write them caveman-style, not prose.
-
-Drop: articles (a/an/the), filler (just/really/basically/actually/simply), hedging ("it might be worth", "you could consider"), pleasantries, connective fluff (however/furthermore/additionally). Fragments OK. Short synonym over long phrase (big not extensive, fix not "implement a solution for"). Merge bullets saying the same thing twice; one example, not three.
-
-Keep exact, never touch: code, inline code, file paths, commands, URLs, technical terms, numbers/versions, error strings. Never drop not/never/no/only — flips meaning, costs more than it saves. Never invent abbreviations (cfg/impl/req) to look terse — same token count, less clear; full word wins.
-
-Applies to `.mimori/memory.md`, `.mimori/decisions.md`, `mimori log --summary`. Not README/CLAUDE.md prose or chat replies — those stay full sentences.
-
-## 4. Todo, Tasklist & Future Ideas Tracking
-
-`mimori` includes zero-daemon CLI task tracking stored in `.mimori/tasks.md`.
-
-### Basic Usage
-
-```bash
-# List all tasks and backlog ideas
+# List active and in-progress tasks
 mimori todo
 mimori todo list
 
-# Add new tasks
-mimori todo add "Implement AST cache pruning" --prio high --tag perf
-mimori todo add "Refactor memory loader" --start           # Adds directly to In Progress
+# Add new task
+mimori todo add "Implement cache lock" --prio high --tag perf
+mimori todo add "Refactor parser" --start                  # Adds directly to In Progress [/]
 
-# Manage task state transitions
-mimori todo start 1        # Move task #1 to In Progress ([/])
-mimori todo done 1         # Mark task #1 as completed ([x] with date)
-mimori todo reopen 1       # Move back to Active Tasks ([ ])
-mimori todo rm 1           # Delete task #1
+# State transitions
+mimori todo start 1         # Move task #1 to In Progress [/]
+mimori todo done 1          # Mark task #1 completed [x] with ISO date
+mimori todo reopen 1        # Move task #1 back to Active [ ]
+mimori todo rm 1            # Delete task #1
 
-# Manage Future Ideas & Backlog
-mimori idea add "Explore quantum symbol indexing" --tag ast
-mimori idea list           # Filter view to ideas only
-mimori idea promote 1      # Move idea #1 into Active Tasks
+# Fuzzy title targeting
+mimori todo done "cache"    # Resolves unique substring match
 ```
 
-### Filtering & Options
-- `--status <todo|in_progress|done|idea|all>`: Filter by lifecycle state.
-- `--tag <tag>` / `-t <tag>`: Filter by tag (e.g. `mimori todo --tag perf`).
-- `--plain`: Emit clean text without ANSI colors (safe for piping).
-- Substring targeting: `mimori todo done "AST"` resolves fuzzy text matches if unique.
-
-## 5. Ponytail Technical Debt & Ledger Reconciliation
-
-`mimori debt` scans in-code `# ponytail:` / `// ponytail:` deferral comments and manages the debt ledger:
-
+### Backlog & Ideas Commands (`idea`)
 ```bash
-# List all in-code ponytail debt markers with ceilings and upgrade triggers
+# Add idea to backlog
+mimori idea add "Add tree-sitter AST fallback" --tag parser
+
+# List ideas only
+mimori idea
+mimori idea list
+
+# Promote idea to active task
+mimori idea promote 1       # Moves from [?] to [ ]
+```
+
+### Flags & Filters
+- `--status <todo|in_progress|done|idea|all>`: Filter by status.
+- `--tag <tag>` / `-t <tag>`: Filter by tag.
+- `--prio <high|med|low>`: Filter or set priority.
+- `--plain`: Plain text output (no ANSI colors, pipeline-friendly).
+
+---
+
+## 5. Ponytail Technical Debt (`debt`)
+
+Tracks `# ponytail: <what> <- <ceiling> -> <upgrade trigger>` and `// ponytail: ...` in source code.
+
+### Commands
+```bash
+# List all in-code debt markers with ceilings and triggers
 mimori debt
 mimori debt list
 
 # Synchronize in-code markers into .mimori/memory.md (## KNOWN DEBT)
-# Automatically prunes resolved markers and respects the 30-line debt cap
+# Auto-prunes resolved markers; preserves manual waivers ('accepted ...')
 mimori debt sync
 
-# CI Validation Gate: Verify all markers have valid triggers (exit 0 / exit 1)
-mimori debt check
+# CI Validation Gate: verify all markers have explicit triggers
+mimori debt check           # Exit 0 if valid, exit 1 if missing triggers
 ```
 
-## 6. Log Task Activity & Telemetry
+---
 
-When finishing a task or major milestone, log a **high-level overview** — what changed and why it matters, not a step-by-step of how you did it. One line, caveman style (above), similar in scope to a git commit subject line:
+## 6. Telemetry & Activity Logging (`log` / `history`)
 
+Appends milestone entries to `.mimori/activity.jsonl`.
+
+### Commands
 ```bash
+# Log completed milestone (keep summary short and factual)
 mimori log \
   --action "refactor-auth" \
-  --summary "Unified token validation into one middleware, stop 3 endpoints re-implementing it" \
+  --summary "Unified token validation middleware; removed duplicate endpoints" \
   --files "auth.py,middleware.py,test_auth.py"
+
+# Inspect past activity log
+mimori history
+mimori history --limit 10
+mimori history --plain
 ```
 
-`dump`'s Recent Activity elides any summary past ~160 chars (see Budget above), and `mimori log` warns if yours runs long — that's the signal you drifted into implementation-detail prose. Save the mechanism, the file-by-file breakdown, and the "how" for the commit message; `Recent Activity` exists so an agent can scan "what happened lately" in one pass at session start, not replay the session.
+---
 
-To inspect recent activities across sessions:
+## 7. Cache Management & Garbage Collection (`clean`)
 
+Snapshots from `mimori dump --file` live in `$XDG_RUNTIME_DIR/mimori` (fallback `/tmp/mimori-$UID/`).
+
+### Retention Policy
+- Max 2 snapshots per repo (`MIMORI_CACHE_MAX_PER_REPO=2`).
+- Global TTL: 72 hours (`MIMORI_CACHE_TTL_HOURS=72.0`).
+- Global Max Files: 50 (`MIMORI_CACHE_MAX_FILES=50`).
+- Non-blocking GC runs automatically on every `mimori dump --file`.
+
+### Manual Cleanup Commands
 ```bash
-mimori history --limit 5
+# Run GC pruning pass
+mimori clean
+
+# Purge all cached snapshots immediately
+mimori clean --all
 ```
 
-## 7. Cache Management & Garbage Collection
+---
 
-Context snapshots generated via `mimori dump --file` are stored in the user runtime directory (`$XDG_RUNTIME_DIR/mimori` or `/tmp/mimori-$UID/`).
+## 8. Directory & File Formats
 
-### Automatic In-Flight Pruning
-On every `mimori dump --file` execution, `mimori` automatically performs opportunistic non-blocking garbage collection:
-- **Per-Repo LRU Retention**: Retains only the **2 most recent snapshots** per repository (`ctx-<repo>-<commit>.md`), deleting older commit snapshots for that repo.
-- **Global TTL**: Any snapshot older than **72 hours (3 days)** is automatically removed across all repos.
-- **Global Safety Cap**: Keeps at most **50 snapshots** total, purging oldest first.
-
-### Environment Overrides
-- `MIMORI_CACHE_MAX_PER_REPO`: Max snapshots per repository (default: `2`).
-- `MIMORI_CACHE_TTL_HOURS`: Snapshot expiry in hours (default: `72.0`).
-- `MIMORI_CACHE_MAX_FILES`: Max total snapshot files in cache (default: `50`).
-
-### Manual Cleanup Command
-To manually prune expired snapshots or wipe the cache:
-
-```bash
-mimori clean        # Prune expired and stale snapshots according to retention policy
-mimori clean --all  # Immediately purge all cached snapshots in temp directory
+```
+.mimori/
+├── memory.md        # Domain rules, invariants, gotchas, ## KNOWN DEBT
+├── decisions.md     # ADRs (Context, Decision, Consequences)
+├── tasks.md         # Tasks ([ ], [/], [x]) and Ideas ([?])
+├── repo_map.md      # AST structural map output from `mimori map`
+└── activity.jsonl   # Append-only milestone telemetry
 ```
