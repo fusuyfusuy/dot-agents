@@ -369,8 +369,10 @@ install_cline() {
     echo "==> Configuring Cline..."
     mkdir -p "$HOME/.cline/rules" "$HOME/.cline/skills"
 
-    # Global rules (Cline discovers ~/.cline/rules/)
+    # Global rules & instructions (Cline discovers ~/.cline/rules/, ~/.cline/AGENTS.md, ~/.clinerules)
     link_file "$SCRIPT_DIR/prompts/AGENTS.md" "$HOME/.cline/rules/AGENTS.md"
+    link_file "$SCRIPT_DIR/prompts/AGENTS.md" "$HOME/.cline/AGENTS.md"
+    link_file "$SCRIPT_DIR/prompts/AGENTS.md" "$HOME/.clinerules"
 
     # Skills (directories with SKILL.md) are discovered from ~/.cline/skills/
     link_skills "$HOME/.cline/skills"
