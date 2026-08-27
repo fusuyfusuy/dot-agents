@@ -329,6 +329,11 @@ install_pi() {
             link_file "$ext" "$HOME/.pi/agent/extensions/$(basename "$ext")"
         done
     fi
+
+    # Pi custom models configuration
+    if [ -f "$SCRIPT_DIR/pi/models.json" ]; then
+        link_file "$SCRIPT_DIR/pi/models.json" "$HOME/.pi/agent/models.json"
+    fi
 }
 
 install_opencode() {
