@@ -43,10 +43,11 @@ class TestDelegationTopology(unittest.TestCase):
     def test_agents_md_contract(self):
         self.assertTrue(self.agents_md.exists(), "AGENTS.md must exist")
         content = self.agents_md.read_text(encoding="utf-8")
-        self.assertIn("3.7 Flash Master -> 3.1 Pro Designer/Auditor -> 3.7 Flash Worker", content)
-        self.assertIn("'Model: pro'", content)
-        self.assertIn("'Model: flash'", content)
-        self.assertIn("semantic code diff review", content)
+        self.assertIn("Master Orchestrator", content)
+        self.assertIn("Architect / Auditor", content)
+        self.assertIn("`Model: pro`", content)
+        self.assertIn("`Model: flash`", content)
+        self.assertIn("semantic diff verification", content)
 
     def test_architect_executor_skill_contract(self):
         self.assertTrue(self.architect_skill.exists(), "architect-executor SKILL.md must exist")

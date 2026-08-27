@@ -102,6 +102,21 @@ if [ -n "$MODEL" ]; then
   M="${FG_GRAY} ╱ ${FG_BRIGHT_MAGENTA}${I}${MODEL}${R}"
 fi
 
+# ─── Profile Indicator (2-char shortcode: davaytiyada -> da, yusufakcakaya -> ya) ──
+PROF=""
+PROF_FILE="$HOME/.gemini/antigravity-cli/profiles/current"
+if [ -f "$PROF_FILE" ]; then
+  CURR_P=$(head -n 1 "$PROF_FILE" 2>/dev/null || true)
+  if [ -n "$CURR_P" ]; then
+    case "$(echo "$CURR_P" | tr '[:upper:]' '[:lower:]')" in
+      davaytiyada*|da*) USER_TAG="da" ;;
+      yusuf*|ya*)       USER_TAG="ya" ;;
+      *)                USER_TAG="${CURR_P:0:2}" ;;
+    esac
+    PROF="${FG_GRAY} ╱ ${FG_BRIGHT_CYAN}${USER_TAG}${R}"
+  fi
+fi
+
 # ─── Sandbox Badge ───────────────────────────────────────────────────────────
 if [ "$SANDBOX" = "true" ]; then
   SB="${FG_GRAY}sandbox ${FG_BRIGHT_GREEN}${B}ON${R}"
@@ -153,7 +168,7 @@ BG_FMT="${FG_GRAY}tasks ${NUM_COLOR}${BG_TASKS}${R}"
 DOT="${FG_GRAY} · ${R}"
 
 # ─── Output ──────────────────────────────────────────────────────────────────
-LINE1="${S}${M}${V}"
+LINE1="${S}${PROF}${M}${V}"
 LINE2=" ${CTX}${DOT}${ART_FMT}${DOT}${SUB_FMT}${DOT}${BG_FMT}${DOT}${SB}"
 
 if [ "$COLS" -ge 120 ]; then

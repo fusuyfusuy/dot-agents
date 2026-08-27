@@ -190,12 +190,9 @@ async function getTsMorphProject(cwd: string): Promise<any | null> {
     _tsMorph = await import("ts-morph");
     _tsMorphProject = new _tsMorph.Project({
       skipFileDependencyResolution: true,
-      skipAddingFilesFromTsConfig: true,
       compilerOptions: { allowJs: true, target: _tsMorph.ScriptTarget.Latest },
     });
-    // ponytail: LRU cap 200 source files, single shared Project
-    // ceiling: grows with unique files edited per session; upgrade path
-    // is explicit LRU eviction via project.removeSourceFile() when cap hit.
+    // ponytail: LRU cap 200 source files, single shared Project <- memory footprint -> explicit LRU eviction via project.removeSourceFile() when unique files exceed 200
     return _tsMorphProject;
   } catch (e) {
     return null;
@@ -287,7 +284,7 @@ async function surgicalEditViaTsMorph(
         else if (op.target === "class") node = sourceFile.getClass(op.name);
         else if (op.target === "interface")
           node = sourceFile.getInterface(op.name);
-        // ponytail: method/property/arrow_function targets not wired in stub
+        // ponytail: method/property/arrow_function targets not wired in stub <- basic function/class/interface -> wire full AST traversal when method-level edits are required
         if (!node)
           throw new Error(
             `target not found: ${op.target} ${op.name} (stub supports function/class/interface)`,
@@ -927,8 +924,7 @@ export default function (pi: ExtensionAPI) {
             ],
             isError: true,
           };
-        // ponytail: naive text move — upgrade path is LSP workspace-symbol + ts-morph move
-        // ceiling: misses re-exports, dynamic imports, and multi-symbol spans
+        // ponytail: naive text move <- misses re-exports and dynamic imports -> LSP workspace-symbol + ts-morph move when multi-file symbol refactors are requested
         const lines = fromContent.split("\n");
         // heuristic: take block containing symbol (from symbol line to next blank or dedent)
         let start = -1;
@@ -1063,7 +1059,7 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       // try pi-lens symbol_search if the host exposed it (check via ctx/E not reliable here)
-      // ponytail: full PageRank+trigram ranking deferred — stub scores by fuzzy basename + cochange
+      // ponytail: full PageRank+trigram ranking deferred <- fuzzy basename + cochange -> embed full AST symbol graph when symbol lookup accuracy drops below 80%
       try {
         const { execFile } = await import("node:child_process");
         const { promisify } = await import("node:util");
@@ -1099,7 +1095,7 @@ export default function (pi: ExtensionAPI) {
           .sort((a, b) => b.score - a.score)
           .slice(0, limit * 2);
 
-        // cochange boost for top candidates (ponytail: only top 5 get cochange to stay cheap)
+        // cochange boost for top candidates (ponytail: only top 5 get cochange <- top 5 limit -> calculate cochange dynamically across all candidates when limit exceeds 10)
         const top5 = scored.slice(0, 5);
         const coMap = new Map<string, number>();
         for (const cand of top5) {

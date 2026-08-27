@@ -11,10 +11,7 @@
 // → ~/.pi/agent/idle-summary.json → .pi/idle-summary.json → PI_* env.
 // Hot-reload with /reload or restart pi.
 //
-// ponytail: budgeted tail walk is O(n) over session entries but capped at
-// maxInputTokens (≈8k ≈32k chars). Ceiling is entry count; fine for pi
-// session files (<10k entries). Upgrade path: streaming read + early cutoff
-// if sessions grow huge.
+// ponytail: budgeted tail walk is O(n) over session entries <- maxInputTokens cap -> streaming read + early cutoff when session entries exceed 10k
 //
 
 // @ts-nocheck — pi extension runs via jiti, not this project's tsconfig; suppress missing pi/node types

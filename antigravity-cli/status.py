@@ -577,6 +577,24 @@ def get_vcs_info(data: dict) -> tuple[str, str, bool]:
 SEP = f" {GRAY}│{RESET} "
 
 
+def get_user_tag() -> str:
+    """Return 2-character active profile tag: davaytiyada -> da, yusufakcakaya -> ya."""
+    prof_file = os.path.expanduser("~/.gemini/antigravity-cli/profiles/current")
+    if os.path.isfile(prof_file):
+        try:
+            with open(prof_file, "r", encoding="utf-8") as f:
+                name = f.read().strip().lower()
+                if name.startswith("davaytiyada") or name == "da":
+                    return "da"
+                if name.startswith("yusuf") or name == "ya":
+                    return "ya"
+                if name:
+                    return name[:2]
+        except Exception:
+            pass
+    return ""
+
+
 def render(data: dict) -> str:
     # 1. Git repository & branch
     repo_name, branch, dirty = get_vcs_info(data)
@@ -586,6 +604,10 @@ def render(data: dict) -> str:
         git_display = f"{GREEN}{repo_name}{GRAY}:{branch_color}{branch}{dirty_str}{RESET}"
     else:
         git_display = f"{GREEN}{repo_name}{RESET}"
+
+    # 1.5 Active User Tag
+    user_tag = get_user_tag()
+    user_display = f"{CYAN}{user_tag}{RESET}{SEP}" if user_tag else ""
 
     # 2. Model
     model_info = data.get("model", {})
@@ -643,6 +665,7 @@ def render(data: dict) -> str:
     # ── Assemble clean single-line status row ──────────────────────────────────
     return (
         f"{git_display}{sandbox_str}{SEP}"
+        f"{user_display}"
         f"{model_display}{SEP}"
         f"{state_display}{SEP}"
         f"{ctx_display}{SEP}"

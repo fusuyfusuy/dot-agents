@@ -6,6 +6,8 @@ Zero external dependencies - Python standard library only.
 
 from __future__ import annotations
 
+__version__ = "1.2.0"
+
 import argparse
 import array
 import ast
@@ -2428,12 +2430,12 @@ def scan_ponytail_debt(root: Path, files: Optional[List[str]] = None) -> List[De
                 if not m_loose:
                     continue
                 s_line = line.strip()
-                if s_line.startswith(('"', "'", 'f"', "f'", 'r"', "r'", 'b"', "b'", "RE_", "const ", "let ", "var ", "assert ", "print(", "help=", "description=")):
+                if s_line.startswith(('"', "'", 'f"', "f'", 'r"', "r'", 'b"', "b'", "RE_", "const ", "let ", "var ", "assert ", "print(", "help=", "description=", "-", "* **", "**")):
                     continue
                 if "re.compile" in line or ("_test" in rel and rel != "debt_test"):
                     continue
-                prefix = line[:m_loose.start()]
-                if not any(marker in prefix for marker in ("#", "//", "/*", "*", "<!--")):
+                prefix = line[:m_loose.start()].strip()
+                if not (prefix.startswith(("#", "//", "/*", "<!--")) or prefix == "*"):
                     continue
 
             seen_locations.add(loc)
@@ -3309,6 +3311,7 @@ def run_self_test() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="mimori", description="Zero-daemon Agent Context, Memory, & Activity Tracker")
+    parser.add_argument("--version", action="version", version=f"mimori {__version__}")
     parser.add_argument("--test", action="store_true", help="Run self-tests and exit")
     subparsers = parser.add_subparsers(dest="command", help="Sub-command to execute")
 
@@ -3338,12 +3341,12 @@ def main() -> int:
         help="Write snapshot to user temp file ($XDG_RUNTIME_DIR/mimori/ctx-<repo>-<commit>.md) or custom path",
     )
 
-    log_parser = subparsers.add_parser("log", help="Append an entry to .mimori/activity.jsonl")
-    log_parser.add_argument("--action", required=True, help="Short action name (e.g. 'feature-auth')")
-    log_parser.add_argument("--summary", required=True, help="Detailed summary of change and rationale")
-    log_parser.add_argument("--files", default="", help="Comma-separated list of modified files")
+    log_parser = subparsers.add_parser("log", help="Append a repository action entry to .mimori/activity.jsonl")
+    log_parser.add_argument("--action", required=True, help="Short action identifier (e.g. 'refactor-auth', 'benchmark-sweep')")
+    log_parser.add_argument("--summary", required=True, help="High-level 1-line caveman summary of action (<160 chars)")
+    log_parser.add_argument("--files", default="", help="Comma-separated list of modified or inspected files")
 
-    hist_parser = subparsers.add_parser("history", help="Show recent logged agent actions")
+    hist_parser = subparsers.add_parser("history", help="Show recent logged repository actions")
     hist_parser.add_argument("--limit", type=int, default=10, help="Number of records to show (default: 10)")
 
     clean_parser = subparsers.add_parser("clean", help="Clean stale or expired context snapshots from user temp directory")

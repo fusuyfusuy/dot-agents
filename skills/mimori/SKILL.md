@@ -24,7 +24,7 @@ Zero-daemon agent context, AST symbol mapping, and activity tracking CLI stored 
 | **Audit Ponytail Debt** | `mimori debt` | List all in-code `# ponytail:` / `// ponytail:` markers. |
 | **Sync Debt Ledger** | `mimori debt sync` | Reconcile in-code markers into `.mimori/memory.md` (`## KNOWN DEBT`). |
 | **Validate Debt CI** | `mimori debt check` | Exit 0 if all markers have valid triggers, exit 1 if malformed. |
-| **Log Work Done** | `mimori log --action <a> --summary <s>` | Task milestone completion; records to `activity.jsonl`. |
+| **Log Repo Action** | `mimori log --action <a> --summary <s>` | Log discrete action, tool execution, or edit to `activity.jsonl`. |
 | **View History** | `mimori history --limit <N>` | Audit recent cross-session activity log entries. |
 | **Prune Cache** | `mimori clean` / `mimori clean --all` | Prune expired snapshots in `$XDG_RUNTIME_DIR/mimori`. |
 
@@ -166,17 +166,23 @@ mimori debt check           # Exit 0 if valid, exit 1 if missing triggers
 
 ---
 
-## 6. Telemetry & Activity Logging (`log` / `history`)
+## 6. Action Journal & Activity Logging (`log` / `history`)
 
-Appends milestone entries to `.mimori/activity.jsonl`.
+Appends repository actions, refactors, tooling executions, and modifications to `.mimori/activity.jsonl`.
 
 ### Commands
 ```bash
-# Log completed milestone (keep summary short and factual)
+# Log completed repository action (keep summary short, factual, caveman style)
 mimori log \
   --action "refactor-auth" \
   --summary "Unified token validation middleware; removed duplicate endpoints" \
   --files "auth.py,middleware.py,test_auth.py"
+
+# Log tooling sweep or dataset update
+mimori log \
+  --action "benchmark-sweep" \
+  --summary "Ran 50-model benchmark sweep across openrouter catalog" \
+  --files "docs/data/ocgo_live.json"
 
 # Inspect past activity log
 mimori history
@@ -215,5 +221,5 @@ mimori clean --all
 ├── decisions.md     # ADRs (Context, Decision, Consequences)
 ├── tasks.md         # Tasks ([ ], [/], [x]) and Ideas ([?])
 ├── repo_map.md      # AST structural map output from `mimori map`
-└── activity.jsonl   # Append-only milestone telemetry
+└── activity.jsonl   # Append-only repository action journal
 ```

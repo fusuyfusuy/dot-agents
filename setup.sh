@@ -12,11 +12,13 @@ detect_agents() {
     HAVE_AGY=false
     HAVE_PI=false
     HAVE_OPENCODE=false
+    HAVE_CLINE=false
 
     if command -v claude >/dev/null 2>&1 || [ -d "$HOME/.claude" ]; then HAVE_CLAUDE=true; fi
     if command -v agy >/dev/null 2>&1 || [ -d "$HOME/.gemini" ]; then HAVE_AGY=true; fi
     if command -v pi >/dev/null 2>&1 || [ -d "$HOME/.pi" ]; then HAVE_PI=true; fi
     if command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; then HAVE_OPENCODE=true; fi
+    if command -v cline >/dev/null 2>&1 || [ -d "$HOME/.cline" ]; then HAVE_CLINE=true; fi
 }
 
 state() { [ "$1" = true ] && echo "installed" || echo "not found"; }
@@ -31,12 +33,14 @@ resolve_selection() {
     INSTALL_AGY=false
     INSTALL_PI=false
     INSTALL_OPENCODE=false
+    INSTALL_CLINE=false
     case "$sel" in
     all)
         INSTALL_CLAUDE=$HAVE_CLAUDE
         INSTALL_AGY=$HAVE_AGY
         INSTALL_PI=$HAVE_PI
         INSTALL_OPENCODE=$HAVE_OPENCODE
+        INSTALL_CLINE=$HAVE_CLINE
         ;;
     none) : ;;
     *)
@@ -44,6 +48,7 @@ resolve_selection() {
         [[ "$sel" == *a* ]] && INSTALL_AGY=true
         [[ "$sel" == *p* ]] && INSTALL_PI=true
         [[ "$sel" == *o* ]] && INSTALL_OPENCODE=true
+        [[ "$sel" == *l* ]] && INSTALL_CLINE=true
         ;;
     esac
 }
@@ -54,6 +59,7 @@ choose_agents() {
     printf "    [a] AGY (Antigravity/Gemini)  : %s\n" "$(state "$HAVE_AGY")"
     printf "    [p] pi                       : %s\n" "$(state "$HAVE_PI")"
     printf "    [o] opencode                 : %s\n" "$(state "$HAVE_OPENCODE")"
+    printf "    [l] Cline                    : %s\\n" "$(state "$HAVE_CLINE")"
     echo
 
     # Non-interactive override for automation/CI: AGENTS='cap' | 'all' | 'none' | letters.
@@ -69,6 +75,7 @@ choose_agents() {
         INSTALL_AGY=$HAVE_AGY
         INSTALL_PI=$HAVE_PI
         INSTALL_OPENCODE=$HAVE_OPENCODE
+        INSTALL_CLINE=$HAVE_CLINE
         echo "==> Non-interactive shell: installing for all detected agents."
         return
     fi
@@ -183,26 +190,21 @@ install_shared() {
         "$SCRIPT_DIR/antigravity-cli/agy-quota-cache.py" \
         "$SCRIPT_DIR/antigravity-cli/agy-sidebar.py" \
         "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" \
+        "$SCRIPT_DIR/antigravity-cli/agy-auth.py" \
+        "$SCRIPT_DIR/antigravity-cli/test_agy_auth.py" \
         "$SCRIPT_DIR/antigravity-cli/hooks/guard-destructive.sh" \
         "$SCRIPT_DIR/antigravity-cli/hooks/git-checkpoint.sh" \
         "$SCRIPT_DIR/mcp-servers/mcp-ast/server.js" \
         "$SCRIPT_DIR/claude/statusline-command.sh" \
-        "$SCRIPT_DIR/scripts/opencode_quota_manager.py" \
-        "$SCRIPT_DIR/scripts/llm_benchmark_aggregator.py" \
-        "$SCRIPT_DIR/scripts/opencode_cost_benefit_analyzer.py" \
-        "$SCRIPT_DIR/scripts/free_model_ranker.py" \
-        "$SCRIPT_DIR/scripts/stealth_model_detector.py" \
         "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs"
 
     mkdir -p "$HOME/.local/bin"
 
     # CLI Binaries
     link_file "$SCRIPT_DIR/skills/mimori/mimori" "$HOME/.local/bin/mimori"
-    link_file "$SCRIPT_DIR/scripts/opencode_quota_manager.py" "$HOME/.local/bin/ocgo"
-    link_file "$SCRIPT_DIR/scripts/opencode_cost_benefit_analyzer.py" "$HOME/.local/bin/ocheck"
-    link_file "$SCRIPT_DIR/scripts/free_model_ranker.py" "$HOME/.local/bin/fcheck"
-    link_file "$SCRIPT_DIR/scripts/stealth_model_detector.py" "$HOME/.local/bin/scheck"
-    link_file "$SCRIPT_DIR/scripts/llm_benchmark_aggregator.py" "$HOME/.local/bin/bcheck"
+    link_file "$SCRIPT_DIR/antigravity-cli/agy-auth.py" "$HOME/.local/bin/agy-auth"
+    link_file "$SCRIPT_DIR/antigravity-cli/agy-auth.py" "$HOME/.local/bin/agy-switch"
+    link_file "$SCRIPT_DIR/antigravity-cli/agy-auth.py" "$HOME/.local/bin/agy-profile"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-sidebar.py" "$HOME/.local/bin/agy-sidebar"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/agy-artifacts"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/agy-art"
@@ -291,13 +293,20 @@ install_agy() {
     link_file "$AGY_DIR/status.py" "$HOME/.antigravity/status.py"
     link_file "$AGY_DIR/agy-quota-cache.py" "$HOME/.antigravity/agy-quota-cache.py"
     link_file "$AGY_DIR/agy-proxy.py" "$HOME/.antigravity/agy-proxy.py"
-    chmod +x "$AGY_DIR/agy-proxy.py"
+    link_file "$AGY_DIR/agy-auth.py" "$HOME/.antigravity/agy-auth.py"
+    chmod +x "$AGY_DIR/agy-proxy.py" "$AGY_DIR/agy-auth.py"
 
     # User systemd service for persistent proxy bridge
     mkdir -p "$HOME/.config/systemd/user"
     link_file "$AGY_DIR/agy-proxy.service" "$HOME/.config/systemd/user/agy-proxy.service"
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     systemctl --user enable --now agy-proxy.service >/dev/null 2>&1 || true
+
+    # User systemd service & timer for daily token keepalive
+    link_file "$AGY_DIR/agy-auth-keepalive.service" "$HOME/.config/systemd/user/agy-auth-keepalive.service"
+    link_file "$AGY_DIR/agy-auth-keepalive.timer" "$HOME/.config/systemd/user/agy-auth-keepalive.timer"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable --now agy-auth-keepalive.timer >/dev/null 2>&1 || true
 
     link_skills "$HOME/.gemini/config/skills"
 }
@@ -351,6 +360,17 @@ EOF
     link_skills "$HOME/.claude/skills"
 }
 
+install_cline() {
+    echo "==> Configuring Cline..."
+    mkdir -p "$HOME/.cline/rules" "$HOME/.cline/skills"
+
+    # Global rules (Cline discovers ~/.cline/rules/)
+    link_file "$SCRIPT_DIR/prompts/AGENTS.md" "$HOME/.cline/rules/AGENTS.md"
+
+    # Skills (directories with SKILL.md) are discovered from ~/.cline/skills/
+    link_skills "$HOME/.cline/skills"
+}
+
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
@@ -364,6 +384,7 @@ if [ "$INSTALL_CLAUDE" = true ]; then install_claude; fi
 if [ "$INSTALL_AGY" = true ]; then install_agy; fi
 if [ "$INSTALL_PI" = true ]; then install_pi; fi
 if [ "$INSTALL_OPENCODE" = true ]; then install_opencode; fi
+if [ "$INSTALL_CLINE" = true ]; then install_cline; fi
 if [ "$INSTALL_TMUX_STATUSLINE" = true ]; then
     [ "$INSTALL_TMUX_PLUGINS" = false ] && INSTALL_TMUX_PLUGINS=true &&
         echo "==> Statusline requires the plugins; installing them too."
