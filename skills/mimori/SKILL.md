@@ -14,6 +14,7 @@ Zero-daemon agent context, AST symbol mapping, and activity tracking CLI stored 
 | **Warmup Snapshot** | `mimori dump --file` | Session start, subagent kickoff, pre-refactor orientation. |
 | **Direct Dump Output** | `mimori dump` | Pipe full context directly to stdout without writing file. |
 | **Print Structural Map** | `mimori map --stdout` | Inspect ranked symbols, callers, and import graph in terminal. |
+| **Context Slice** | `mimori slice <file>[:<sym>]` | Deterministic context slice with 1-hop lineage (callers + dependencies). |
 | **Save Structural Map** | `mimori map` | Update `.mimori/repo_map.md` on disk for external tools. |
 | **Initialize Workspace** | `mimori init` | First-time project setup; scaffolds `.mimori/` directory. |
 | **List Tasks** | `mimori todo` | Review active tasks, in-progress items, and backlog. |
@@ -101,7 +102,34 @@ mimori map --stdout --format json
 
 ---
 
-## 4. Tasks & Backlog (`todo` / `idea`)
+## 4. Context Slicing (`slice`)
+
+Deterministic context extraction combining target coordinates, 1-hop lineage (callers/dependencies), contract, and exact source slice without reading whole files.
+
+### Commands
+```bash
+# Slice specific function or class
+mimori slice src/auth/token.py:verify_jwt
+mimori slice server.ts:startServer
+
+# Slice whole file with bounded lines
+mimori slice src/engine/core.py --lines 50
+
+# Fuzzy targeting (resolves filename/symbol substring)
+mimori slice token.py:verify_jwt
+mimori slice FileInfo
+```
+
+### Emitted Fields
+- **Coordinates**: Start/end line numbers and total file length.
+- **Ancestors (In-Degree)**: Upstream modules importing/calling this file.
+- **Dependencies (Out-Degree)**: Downstream imports used by this file.
+- **Contract**: Signature, docstrings, and exported types.
+- **Source Slice**: Line-numbered code snippet (capped by `--lines`, default 100).
+
+---
+
+## 5. Tasks & Backlog (`todo` / `idea`)
 
 Zero-daemon task tracking stored in `.mimori/tasks.md`.
 
@@ -146,7 +174,7 @@ mimori idea promote 1       # Moves from [?] to [ ]
 
 ---
 
-## 5. Ponytail Technical Debt (`debt`)
+## 6. Ponytail Technical Debt (`debt`)
 
 Tracks `# ponytail: <what> <- <ceiling> -> <upgrade trigger>` and `// ponytail: ...` in source code.
 
@@ -166,7 +194,7 @@ mimori debt check           # Exit 0 if valid, exit 1 if missing triggers
 
 ---
 
-## 6. Action Journal & Activity Logging (`log` / `history`)
+## 7. Action Journal & Activity Logging (`log` / `history`)
 
 Appends repository actions, refactors, tooling executions, and modifications to `.mimori/activity.jsonl`.
 
@@ -192,7 +220,7 @@ mimori history --plain
 
 ---
 
-## 7. Cache Management & Garbage Collection (`clean`)
+## 8. Cache Management & Garbage Collection (`clean`)
 
 Snapshots from `mimori dump --file` live in `$XDG_RUNTIME_DIR/mimori` (fallback `/tmp/mimori-$UID/`).
 
@@ -213,7 +241,7 @@ mimori clean --all
 
 ---
 
-## 8. Directory & File Formats
+## 9. Directory & File Formats
 
 ```
 .mimori/

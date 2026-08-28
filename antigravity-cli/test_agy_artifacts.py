@@ -763,7 +763,9 @@ class TestOpenerAndTui(unittest.TestCase):
 
     def test_render_markdown_ansi_with_rich_theme(self):
         content = "# Title Heading\n`code_snippet()`\n```python\nx = 10\n```"
-        rendered = agy_artifacts.render_markdown_ansi(content, use_color=True)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            rendered = agy_artifacts.render_markdown_ansi(content, use_color=True)
         self.assertIn("\x1b[", rendered)
         self.assertIn("Title Heading", rendered)
 

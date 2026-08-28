@@ -1391,6 +1391,103 @@ def generate_repo_map(root: Path, budget: int = MAP_BUDGET_DEFAULT,
 
 
 # --------------------------------------------------------------------------
+# context slice
+# --------------------------------------------------------------------------
+
+def _resolve_target_file_and_symbol(target: str, infos: Dict[str, FileInfo]) -> Tuple[Optional[FileInfo], Optional[str]]:
+    f_tok, sym_tok = target.split(":", 1) if ":" in target else (target, None)
+    f_tok = f_tok.strip()
+    sym_tok = sym_tok.strip() if sym_tok else None
+
+    if f_tok in infos:
+        return infos[f_tok], sym_tok
+
+    matches = [i for i in infos.values() if i.path == f_tok or i.path.endswith(f"/{f_tok}") or Path(i.path).name == f_tok]
+    if matches:
+        return matches[0], sym_tok
+
+    if sym_tok is None and f_tok:
+        for i in infos.values():
+            for _, _, txt in i.symbols:
+                if f_tok in txt:
+                    return i, f_tok
+    return None, None
+
+
+def _find_symbol_range(full_path: Path, sym_token: Optional[str], info: FileInfo) -> Tuple[int, int, Optional[str]]:
+    if not sym_token:
+        return 1, info.lines or 1, None
+
+    if full_path.suffix == ".py" and full_path.exists():
+        with contextlib.suppress(Exception):
+            tree = ast.parse(full_path.read_text(encoding="utf-8", errors="ignore"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and (node.name == sym_token or sym_token in node.name):
+                    start = node.lineno
+                    end = getattr(node, "end_lineno", start + 30)
+                    sig = f"class {node.name}" if isinstance(node, ast.ClassDef) else _fmt_signature(node, drop_self=False)
+                    return start, end, sig
+
+    for lineno, _, txt in info.symbols:
+        if sym_token.lower() in txt.lower():
+            return lineno, min(lineno + 30, info.lines or lineno + 30), txt
+    return 1, info.lines or 1, None
+
+
+def _render_slice_code(full_path: Path, start: int, end: int, max_lines: int) -> List[str]:
+    if not full_path.exists() or full_path.is_dir():
+        return ["(file not found on disk)"]
+    try:
+        lines = full_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError as e:
+        return [f"(error reading file: {e})"]
+    total = len(lines)
+    start = max(1, min(start, total))
+    end = min(total, max(start, end))
+    if (end - start + 1) > max_lines:
+        end = start + max_lines - 1
+    out = [f"{str(idx).rjust(5)}: {lines[idx - 1]}" for idx in range(start, end + 1)]
+    if end < total and (end - start + 1) >= max_lines:
+        out.append(f"       ... +{total - end} more lines (clipped to {max_lines} lines)")
+    return out
+
+
+def generate_slice(root: Path, target: str, max_lines: int = 100) -> str:
+    infos = collect_repo(root)
+    info, sym_token = _resolve_target_file_and_symbol(target, infos)
+    if not info:
+        return f"Error: Target '{target}' not found in repository."
+
+    full_path = root / info.path
+    start, end, sym_text = _find_symbol_range(full_path, sym_token, info)
+
+    out = [
+        f"# Slice: `{info.path}`" + (f" (symbol: `{sym_token}`)" if sym_token else ""),
+        f"- **Coordinates**: lines {start}–{end} ({info.lines} total lines)",
+    ]
+    if info.importers:
+        callers = sorted({_importer_label(p) for p in info.importers})
+        out.append(f"- **Ancestors (In-Degree {info.in_degree})**: " + ", ".join(f"`{c}`" for c in callers))
+    else:
+        out.append("- **Ancestors (In-Degree 0)**: (entry point / root)")
+
+    if info.depends_on:
+        deps = sorted({_importer_label(p) for p in info.depends_on})
+        out.append(f"- **Dependencies (Out-Degree {len(info.depends_on)})**: " + ", ".join(f"`{d}`" for d in deps))
+
+    if info.doc:
+        out.append(f"- **Doc**: \"{info.doc}\"")
+    if sym_text:
+        out.append(f"- **Contract**: `{sym_text}`")
+
+    ext = full_path.suffix.lstrip(".") or "text"
+    out.extend(["", f"```{ext}"])
+    out.extend(_render_slice_code(full_path, start, end, max_lines))
+    out.append("```")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
 # commands
 # --------------------------------------------------------------------------
 
@@ -1899,6 +1996,17 @@ def cmd_map(args: argparse.Namespace) -> int:
         map_file = mimori_dir / "repo_map.md"
         atomic_write_text(map_file, map_content, encoding="utf-8")
         print(f"Updated {map_file.relative_to(root)}")
+    return 0
+
+
+def cmd_slice(args: argparse.Namespace) -> int:
+    root = find_repo_root()
+    if not getattr(args, "target", None):
+        print("Error: Target path or symbol required (e.g. 'mimori slice src/core.py:CoreApp')")
+        return 1
+    target_str = args.target[0] if isinstance(args.target, list) else str(args.target)
+    output = generate_slice(root, target_str, max_lines=getattr(args, "lines", 100))
+    print(output)
     return 0
 
 
@@ -2923,6 +3031,25 @@ def _test_focus(root: Path) -> None:
     assert "budget" in small and "collapsed" in small, "focused maps still respect the budget"
 
 
+def _test_slice(root: Path) -> None:
+    res = generate_slice(root, "src/core.py:CoreApp")
+    assert "# Slice: `src/core.py`" in res, f"slice header must match: {res}"
+    assert "symbol: `CoreApp`" in res, f"symbol must be identified: {res}"
+    assert "class CoreApp" in res, f"symbol code must be present: {res}"
+    assert "Ancestors (In-Degree" in res, f"ancestors must be listed: {res}"
+    assert "one, three, two" in res or "one" in res, f"importers must be present: {res}"
+
+    res_method = generate_slice(root, "src/core.py:run")
+    assert "def run" in res_method or "run(" in res_method, f"method slice must locate run: {res_method}"
+
+    res_file = generate_slice(root, "src/core.py", max_lines=15)
+    assert "lines 1–" in res_file, f"whole-file coordinates must start at 1: {res_file}"
+    assert "Core engine for the fixture." in res_file, f"docstring must appear: {res_file}"
+
+    res_fuzzy = generate_slice(root, "core.py:CoreApp")
+    assert "# Slice: `src/core.py`" in res_fuzzy, "fuzzy filename matching must resolve src/core.py"
+
+
 def _test_misc(root: Path) -> None:
     assert get_git_branch(Path(tempfile.gettempdir())) is None, \
         "non-git directories must report no branch, never a fabricated 'main'"
@@ -3418,6 +3545,7 @@ def run_self_test() -> int:
         _test_log_summary_length(root)
         _test_activity_tail(root)
         _test_focus(root)
+        _test_slice(root)
         _test_misc(root)
         _test_git_integration(root)
         _test_dump_is_live(root)
@@ -3503,6 +3631,10 @@ def main() -> int:
     idea_parser.add_argument("--tag", "-t", action="append", default=[], help="Tag(s) for idea")
     idea_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
 
+    slice_parser = subparsers.add_parser("slice", help="Deterministic context slice for a file or symbol with 1-hop lineage")
+    slice_parser.add_argument("target", nargs="+", help="Target path or symbol (e.g. 'file.py:sym' or 'file.py')")
+    slice_parser.add_argument("--lines", "-l", type=int, default=100, help="Max source lines to render (default: 100)")
+
     debt_parser = subparsers.add_parser("debt", help="Scan, sync, and validate ponytail: technical debt markers")
     debt_parser.add_argument("action", nargs="?", default="list", choices=["list", "sync", "check"], help="Action: list, sync with memory.md, or check for CI")
     debt_parser.add_argument("--plain", action="store_true", help="Output plain text without ANSI colors")
@@ -3519,6 +3651,7 @@ def main() -> int:
     handlers = {
         "init": cmd_init,
         "map": cmd_map,
+        "slice": cmd_slice,
         "dump": cmd_dump,
         "log": cmd_log,
         "history": cmd_history,
