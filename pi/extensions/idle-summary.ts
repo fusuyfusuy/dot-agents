@@ -56,6 +56,7 @@ let lastIdleAt = 0;
 let lastFooterSentence = "";
 let currentCtx: any = null;
 let lastBranchChangeUnsub: (() => void) | null = null;
+let llmUnavailableReason: string | null = null;
 
 // recent prompts deque
 const recentPrompts: string[] = [];
@@ -347,28 +348,83 @@ async function tryCompleteWithFallback(
 	maxTokens: number,
 	primary: any,
 ): Promise<any> {
+	// Locate complete function — handles pi API drift
+	let completeFn: any = null;
+	let completeOwner: any = null;
+	try {
+		if (typeof ctx?.modelRegistry?.complete === "function") {
+			completeFn = ctx.modelRegistry.complete.bind(ctx.modelRegistry);
+			completeOwner = ctx.modelRegistry;
+		} else {
+			// Scan alternative locations (runtime drift, future pi versions)
+			const candidates: any[] = [
+				ctx?.modelRegistry?.runtime,
+				(ctx as any)?.runtime,
+				(ctx as any)?.modelRuntime,
+				(ctx as any)?.client,
+				(ctx as any)?.pi,
+			];
+			for (const c of candidates) {
+				if (c && typeof c.complete === "function") {
+					completeFn = c.complete.bind(c);
+					completeOwner = c;
+					break;
+				}
+			}
+			// Last resort: scan ctx for any object with complete
+			if (!completeFn && ctx && typeof ctx === "object") {
+				for (const k of Object.keys(ctx)) {
+					const v: any = (ctx as any)[k];
+					if (v && typeof v.complete === "function") {
+						completeFn = v.complete.bind(v);
+						completeOwner = v;
+						break;
+					}
+				}
+			}
+		}
+	} catch (_e) {
+		void _e;
+	}
+	if (!completeFn) {
+		llmUnavailableReason = `complete missing typeof=${typeof ctx?.modelRegistry?.complete}`;
+		try {
+			const fs = require("node:fs") as typeof import("node:fs");
+			const reg = ctx?.modelRegistry;
+			const keys = reg ? Object.keys(reg).slice(0, 20).join(",") : "no-registry";
+			const protoKeys = reg
+				? Object.getOwnPropertyNames(Object.getPrototypeOf(reg) ?? {}).slice(0, 20).join(",")
+				: "no-proto";
+			const ctxKeys = ctx ? Object.keys(ctx).slice(0, 20).join(",") : "no-ctx";
+			const typeInfo = `typeof complete=${typeof reg?.complete} typeof registry=${typeof reg} ctxKeys=[${ctxKeys}] keys=[${keys}] proto=[${protoKeys}]`;
+			const stack = new Error().stack?.split("\n").slice(1, 4).join(" | ") ?? "";
+			fs.appendFileSync(
+				"/tmp/idle-summary-debug.log",
+				`[no-complete] ${new Date().toISOString()} ${typeInfo} stack=${stack}\n`,
+			);
+		} catch (_e) {
+			void _e;
+		}
+		throw new Error(
+			`modelRegistry.complete unavailable (typeof=${typeof ctx?.modelRegistry?.complete}) — pi version mismatch? need >=0.84`,
+		);
+	}
 	const chain: any[] = [];
 	if (primary) chain.push(primary);
-	// nemotron fallback (second per tests, clean)
 	try {
 		const ds = ctx.modelRegistry.find("opencode", "nemotron-3-ultra-free");
 		if (ds && ds.id !== primary?.id) chain.push(ds);
 	} catch (_e) {
 		void _e;
 	}
-	// dynamic opencode free (any other free)
 	const dyn = getDynamicOpencodeFree(ctx);
-	if (dyn && !chain.some((c) => c.provider === dyn.provider && c.id === dyn.id))
-		chain.push(dyn);
-	// openrouter/free (third per user spec)
+	if (dyn && !chain.some((c) => c.provider === dyn.provider && c.id === dyn.id)) chain.push(dyn);
 	try {
 		const ro = ctx.modelRegistry.find("openrouter", "openrouter/free");
-		if (ro && !chain.some((c) => c.provider === ro.provider && c.id === ro.id))
-			chain.push(ro);
+		if (ro && !chain.some((c) => c.provider === ro.provider && c.id === ro.id)) chain.push(ro);
 	} catch (_e) {
 		void _e;
 	}
-	// fallback to any free as last resort
 	if (chain.length === 0) {
 		const alt = pickSummaryModel(ctx);
 		if (alt) chain.push(alt);
@@ -377,7 +433,6 @@ async function tryCompleteWithFallback(
 	for (let i = 0; i < chain.length; i++) {
 		const m = chain[i];
 		try {
-			// for free models, allow even without strict auth
 			const isFree = /free|big-pickle/i.test(m.id);
 			if (!isFree) {
 				try {
@@ -387,7 +442,13 @@ async function tryCompleteWithFallback(
 					continue;
 				}
 			}
-			const resp = await ctx.modelRegistry.complete(m, { messages }, {
+			const cleanMessages = Array.isArray(messages)
+				? messages.map((mm: any) => ({
+						role: mm.role,
+						content: mm.content,
+					}))
+				: messages;
+			const resp = await completeFn(m, { messages: cleanMessages }, {
 				maxTokens,
 				cacheRetention: "none",
 				sessionId: getUuid(),
@@ -397,7 +458,7 @@ async function tryCompleteWithFallback(
 					const fs = require("node:fs") as typeof import("node:fs");
 					fs.appendFileSync(
 						"/tmp/idle-summary-debug.log",
-						`[fallback-success] ${new Date().toISOString()} used ${m.provider}/${m.id} after ${i} fallbacks\n`,
+						`[fallback-success] ${new Date().toISOString()} used ${m.provider}/${m.id} after ${i} fallbacks via ${completeOwner?.constructor?.name ?? "unknown"}\n`,
 					);
 				} catch (_e) {
 					void _e;
@@ -408,9 +469,11 @@ async function tryCompleteWithFallback(
 			lastErr = e;
 			try {
 				const fs = require("node:fs") as typeof import("node:fs");
+				const msg = String((e as any)?.message ?? e);
+				const stack = (e as any)?.stack?.split("\n").slice(0, 3).join(" | ") ?? "";
 				fs.appendFileSync(
 					"/tmp/idle-summary-debug.log",
-					`[fallback-attempt] ${new Date().toISOString()} ${m.provider}/${m.id} failed: ${String((e as any)?.message ?? e).slice(0, 200)}\n`,
+					`[fallback-attempt] ${new Date().toISOString()} ${m.provider}/${m.id} failed: ${msg.slice(0, 500)} stack=${stack.slice(0, 500)}\n`,
 				);
 			} catch (_e) {
 				void _e;
@@ -659,6 +722,12 @@ async function doFooterUpdate(ctx: any): Promise<void> {
 
 	let sentence = localFooterSentence();
 
+	if (llmUnavailableReason) {
+		// LLM previously detected missing — stay local, avoid spam
+		lastFooterSentence = sentence;
+		showFooterSentence(ctx, sentence);
+		return;
+	}
 	if (shouldUseFooterLLM(ctx)) {
 		// debounce LLM a bit more
 		if (footerLLMTimer) clearTimeout(footerLLMTimer);
@@ -746,6 +815,8 @@ async function doFooterUpdate(ctx: any): Promise<void> {
 						}
 					}
 				} catch (_e) {
+					const msg = String((_e as any)?.message ?? _e ?? "");
+					if (msg.includes("complete")) llmUnavailableReason = msg.slice(0, 120);
 					void _e;
 				}
 				resolve();
@@ -1059,6 +1130,17 @@ async function generateIdleSummary(ctx: any): Promise<string> {
 	try {
 		resp = await tryCompleteWithFallback(ctx, messages, 900, model);
 	} catch (e) {
+		const msg = String((e as any)?.message ?? e);
+		if (msg.includes("complete unavailable") || msg.includes("is not a function") || msg.includes("complete")) {
+			llmUnavailableReason = msg.slice(0, 120);
+			try {
+				const fs = require("node:fs") as typeof import("node:fs");
+				fs.appendFileSync("/tmp/idle-summary-debug.log", `[idle-fallback-local] ${new Date().toISOString()} ${msg.slice(0, 300)}\n`);
+			} catch (_e) {
+				void _e;
+			}
+			return `**Session summary (local, LLM unavailable: ${msg.slice(0, 80)})**\n\n${conversationText.slice(0, 1500)}`;
+		}
 		throw e;
 	}
 	let summary = (resp.content ?? [])

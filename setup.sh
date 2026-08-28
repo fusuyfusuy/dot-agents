@@ -12,19 +12,19 @@ detect_agents() {
     HAVE_AGY=false
     HAVE_PI=false
     HAVE_OPENCODE=false
+    HAVE_OMP=false
     HAVE_CLINE=false
 
     if command -v claude >/dev/null 2>&1 || [ -d "$HOME/.claude" ]; then HAVE_CLAUDE=true; fi
     if command -v agy >/dev/null 2>&1 || [ -d "$HOME/.gemini" ]; then HAVE_AGY=true; fi
     if command -v pi >/dev/null 2>&1 || [ -d "$HOME/.pi" ]; then HAVE_PI=true; fi
     if command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; then HAVE_OPENCODE=true; fi
+    if command -v omp >/dev/null 2>&1 || [ -d "$HOME/.omp" ]; then HAVE_OMP=true; fi
     if command -v cline >/dev/null 2>&1 || [ -d "$HOME/.cline" ]; then HAVE_CLINE=true; fi
 }
 
 state() { [ "$1" = true ] && echo "installed" || echo "not found"; }
 
-# Map a selection string ('cap', 'all', 'none', ...) onto the install flags.
-# 'all' installs whatever was detected; an explicit letter set installs exactly those.
 resolve_selection() {
     local sel
     sel=$(echo "${1:-all}" | tr '[:upper:]' '[:lower:]')
@@ -33,6 +33,7 @@ resolve_selection() {
     INSTALL_AGY=false
     INSTALL_PI=false
     INSTALL_OPENCODE=false
+    INSTALL_OMP=false
     INSTALL_CLINE=false
     case "$sel" in
     all)
@@ -40,6 +41,7 @@ resolve_selection() {
         INSTALL_AGY=$HAVE_AGY
         INSTALL_PI=$HAVE_PI
         INSTALL_OPENCODE=$HAVE_OPENCODE
+        INSTALL_OMP=$HAVE_OMP
         INSTALL_CLINE=$HAVE_CLINE
         ;;
     none) : ;;
@@ -48,21 +50,23 @@ resolve_selection() {
         [[ "$sel" == *a* ]] && INSTALL_AGY=true
         [[ "$sel" == *p* ]] && INSTALL_PI=true
         [[ "$sel" == *o* ]] && INSTALL_OPENCODE=true
+        [[ "$sel" == *m* ]] && INSTALL_OMP=true
         [[ "$sel" == *l* ]] && INSTALL_CLINE=true
+        true
         ;;
     esac
 }
-
 choose_agents() {
     echo "==> Detected agents:"
     printf "    [c] Claude Code              : %s\n" "$(state "$HAVE_CLAUDE")"
     printf "    [a] AGY (Antigravity/Gemini)  : %s\n" "$(state "$HAVE_AGY")"
     printf "    [p] pi                       : %s\n" "$(state "$HAVE_PI")"
     printf "    [o] opencode                 : %s\n" "$(state "$HAVE_OPENCODE")"
+    printf "    [m] omp (Oh My Pi)           : %s\n" "$(state "$HAVE_OMP")"
     printf "    [l] Cline                    : %s\\n" "$(state "$HAVE_CLINE")"
     echo
 
-    # Non-interactive override for automation/CI: AGENTS='cap' | 'all' | 'none' | letters.
+    # Non-interactive override for automation/CI: AGENTS='capoml' | 'all' | 'none' | letters.
     if [ -n "${AGENTS:-}" ]; then
         echo "==> AGENTS override: installing for '$AGENTS'."
         resolve_selection "$AGENTS"
@@ -75,13 +79,14 @@ choose_agents() {
         INSTALL_AGY=$HAVE_AGY
         INSTALL_PI=$HAVE_PI
         INSTALL_OPENCODE=$HAVE_OPENCODE
+        INSTALL_OMP=$HAVE_OMP
         INSTALL_CLINE=$HAVE_CLINE
         echo "==> Non-interactive shell: installing for all detected agents."
         return
     fi
 
     echo "Which agents should I configure here?"
-    echo "  Enter letters to select (e.g. 'capo'), 'all', 'none', or leave blank for all detected:"
+    echo "  Enter letters to select (e.g. 'capoml', 'all', 'none', or leave blank for all detected):"
     read -r sel
     resolve_selection "${sel:-all}"
 }
@@ -107,6 +112,7 @@ resolve_tmux() {
     *)
         [[ "$sel" == *p* ]] && INSTALL_TMUX_PLUGINS=true
         [[ "$sel" == *s* ]] && INSTALL_TMUX_STATUSLINE=true
+        true
         ;;
     esac
 }
@@ -185,16 +191,15 @@ install_shared() {
     # Set executable permissions on scripts
     chmod +x "$SCRIPT_DIR/setup.sh" \
         "$SCRIPT_DIR/skills/mimori/mimori" \
+        "$SCRIPT_DIR/tui-agent-settings/artifacts/art.py" \
         "$SCRIPT_DIR/antigravity-cli/status.py" \
         "$SCRIPT_DIR/antigravity-cli/statusline.sh" \
         "$SCRIPT_DIR/antigravity-cli/agy-quota-cache.py" \
-        "$SCRIPT_DIR/antigravity-cli/agy-sidebar.py" \
         "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" \
         "$SCRIPT_DIR/antigravity-cli/agy-auth.py" \
         "$SCRIPT_DIR/antigravity-cli/test_agy_auth.py" \
         "$SCRIPT_DIR/antigravity-cli/hooks/guard-destructive.sh" \
         "$SCRIPT_DIR/antigravity-cli/hooks/git-checkpoint.sh" \
-        "$SCRIPT_DIR/mcp-servers/mcp-ast/server.js" \
         "$SCRIPT_DIR/claude/statusline-command.sh" \
         "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs"
 
@@ -205,10 +210,11 @@ install_shared() {
     link_file "$SCRIPT_DIR/antigravity-cli/agy-auth.py" "$HOME/.local/bin/agy-auth"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-auth.py" "$HOME/.local/bin/agy-switch"
     link_file "$SCRIPT_DIR/antigravity-cli/agy-auth.py" "$HOME/.local/bin/agy-profile"
-    link_file "$SCRIPT_DIR/antigravity-cli/agy-sidebar.py" "$HOME/.local/bin/agy-sidebar"
-    link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/agy-artifacts"
-    link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/agy-art"
-    link_file "$SCRIPT_DIR/antigravity-cli/agy-artifacts.py" "$HOME/.local/bin/art"
+    link_file "$SCRIPT_DIR/tui-agent-settings/artifacts/art.py" "$HOME/.local/bin/art"
+    link_file "$SCRIPT_DIR/tui-agent-settings/artifacts/art.py" "$HOME/.local/bin/agy-artifacts"
+    link_file "$SCRIPT_DIR/tui-agent-settings/artifacts/art.py" "$HOME/.local/bin/agy-art"
+    # Legacy: agy-sidebar removed (was agy-sidebar.py); clean stale symlink if present
+    if [ -L "$HOME/.local/bin/agy-sidebar" ]; then rm -f "$HOME/.local/bin/agy-sidebar"; echo "  [CLEAN] Removed stale agy-sidebar symlink"; fi
     if [ -f "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs" ]; then
         link_file "$SCRIPT_DIR/skills/viblog-writer/scripts/publish-post.mjs" "$HOME/.local/bin/viblog-publish"
     fi
@@ -216,6 +222,11 @@ install_shared() {
     # Herdr Config
     if [ -d "$HOME/.config/herdr" ] || command -v herdr >/dev/null 2>&1; then
         link_file "$SCRIPT_DIR/herdr/config.toml" "$HOME/.config/herdr/config.toml"
+    fi
+
+    # Secure master secret keys
+    if [ -f "$HOME/.secret.keys" ]; then
+        chmod 0600 "$HOME/.secret.keys"
     fi
 }
 
@@ -283,10 +294,11 @@ install_agy() {
     link_file "$AGY_DIR/keybindings.json" "$HOME/.gemini/antigravity-cli/keybindings.json"
     link_file "$AGY_DIR/config.json" "$HOME/.gemini/config/config.json"
     
-    # Resolve MCP server paths dynamically
-    link_file "$SCRIPT_DIR/mcp-servers" "$HOME/.gemini/config/mcp-servers"
     mkdir -p "$HOME/.gemini/config"
-    sed "s|__MCP_AST_SERVER_PATH__|$HOME/.gemini/config/mcp-servers/mcp-ast/server.js|g" "$AGY_DIR/mcp_config.json" > "$HOME/.gemini/config/mcp_config.json"
+    # mcp_config.json is linked directly if present; no path substitution needed (mcp-ast removed)
+    if [ -f "$AGY_DIR/mcp_config.json" ] && [ -s "$AGY_DIR/mcp_config.json" ]; then
+      cp "$AGY_DIR/mcp_config.json" "$HOME/.gemini/config/mcp_config.json"
+    fi
 
     link_file "$AGY_DIR/hooks/hooks.json" "$HOME/.gemini/config/hooks.json"
     link_file "$AGY_DIR/statusline.sh" "$HOME/.gemini/antigravity-cli/statusline.sh"
@@ -365,6 +377,35 @@ EOF
     link_skills "$HOME/.claude/skills"
 }
 
+install_omp() {
+    echo "==> Configuring omp (Oh My Pi)..."
+    mkdir -p "$HOME/.omp/agent/skills"
+
+    # Global instructions — omp discovers AGENTS.md via native context files.
+    link_file "$SCRIPT_DIR/prompts/AGENTS.md" "$HOME/.omp/agent/AGENTS.md"
+
+    # Skills — native omp location. omp also reads pi skills via
+    # skills.enablePiUser (so sharing is automatic), but explicit native
+    # links keep omp self-contained even if that toggle flips.
+    link_skills "$HOME/.omp/agent/skills"
+
+    # Extensions — same jiti API as pi; fan out pi extensions to omp.
+    mkdir -p "$HOME/.omp/agent/extensions"
+    if [ -d "$SCRIPT_DIR/pi/extensions" ]; then
+        for ext in "$SCRIPT_DIR"/pi/extensions/*.ts; do
+            [ -e "$ext" ] || continue
+            link_file "$ext" "$HOME/.omp/agent/extensions/$(basename "$ext")"
+        done
+    fi
+
+    # Omp-specific overrides (if any) live in tui-agent-settings/omp/.
+    # Do NOT overwrite ~/.omp/agent/config.yml unconditionally — it holds
+    # user modelRoles + auth state. Only seed if missing.
+    if [ ! -f "$HOME/.omp/agent/config.yml" ] && [ -f "$SCRIPT_DIR/tui-agent-settings/omp/config.yml" ]; then
+        link_file "$SCRIPT_DIR/tui-agent-settings/omp/config.yml" "$HOME/.omp/agent/config.yml"
+    fi
+}
+
 install_cline() {
     echo "==> Configuring Cline..."
     mkdir -p "$HOME/.cline/rules" "$HOME/.cline/skills"
@@ -391,6 +432,7 @@ if [ "$INSTALL_CLAUDE" = true ]; then install_claude; fi
 if [ "$INSTALL_AGY" = true ]; then install_agy; fi
 if [ "$INSTALL_PI" = true ]; then install_pi; fi
 if [ "$INSTALL_OPENCODE" = true ]; then install_opencode; fi
+if [ "$INSTALL_OMP" = true ]; then install_omp; fi
 if [ "$INSTALL_CLINE" = true ]; then install_cline; fi
 if [ "$INSTALL_TMUX_STATUSLINE" = true ]; then
     [ "$INSTALL_TMUX_PLUGINS" = false ] && INSTALL_TMUX_PLUGINS=true &&

@@ -37,11 +37,8 @@ Zero-daemon, stdlib-only project memory and ranked repository symbol mapper:
 ### 2. Core Skills & Protocols
 - **`AGENTS.md`**: Standardized pair-programming principles (Explore → Plan → Approve → Execute, Ponytail Lazy Senior Dev ladder, 3-Tier delegation topology).
 - **`ponytail-debt`**: Deferral comment harvester and technical debt ledger auditor.
-- **`code-summary`**: Think-in-code AST and repository inventory one-liners.
-- **`agent-processes`**: Git worktree isolation recipes for multi-agent workflows.
-- **`architect-executor`**: High-throughput orchestration topology.
-- **`goal-audit`**: Autonomous task verification and anti-bamboozle auditing.
-- **`pi-ast`**: Surgical AST structural refactoring and blast-radius analyzer.
+- **`goal-audit`**: Autonomous task verification and anti-bamboozle auditing (GLLA).
+- **`viblog-writer`**: Agent blog publishing from current session context (private).
 
 ### 3. Subagent & Delegation Protocol (3-Tier Topology)
 - **Gemini 3.7 Flash High (Master Orchestrator)**: Rapid conversational turn pacing, triage, tool orchestration, and delegation.

@@ -4,7 +4,7 @@ test_delegation_topology.py — Invariant tests for 3-Tier Agent Delegation Topo
 
 Asserts that:
 1. AGENTS.md establishes Gemini 3.7 Flash High as Master, Gemini 3.1 Pro ('Model: pro') as Architect/Auditor, and Gemini 3.7 Flash ('Model: flash') as Worker.
-2. architect-executor and goal-audit skills declare the identical delegation contract.
+2. goal-audit skill declares the 3-tier delegation contract (architect-executor merged into goal-audit).
 3. README.md is synchronized with the 3-tier delegation protocol.
 4. Harness skill symlinks exist and resolve correctly without dangling paths.
 """
@@ -30,12 +30,10 @@ class TestDelegationTopology(unittest.TestCase):
     def setUp(self):
         if (ROOT / "tui-agent-settings").exists():
             self.agents_md = ROOT / "tui-agent-settings" / "prompts" / "AGENTS.md"
-            self.architect_skill = ROOT / "tui-agent-settings" / "skills" / "architect-executor" / "SKILL.md"
             self.goal_audit_skill = ROOT / "tui-agent-settings" / "skills" / "goal-audit" / "SKILL.md"
             self.skills_dir = ROOT / "tui-agent-settings" / "skills"
         else:
             self.agents_md = ROOT / "prompts" / "AGENTS.md"
-            self.architect_skill = ROOT / "skills" / "architect-executor" / "SKILL.md"
             self.goal_audit_skill = ROOT / "skills" / "goal-audit" / "SKILL.md"
             self.skills_dir = ROOT / "skills"
         self.readme_md = ROOT / "README.md"
@@ -49,15 +47,12 @@ class TestDelegationTopology(unittest.TestCase):
         self.assertIn("`Model: flash`", content)
         self.assertIn("semantic diff verification", content)
 
-    def test_architect_executor_skill_contract(self):
-        self.assertTrue(self.architect_skill.exists(), "architect-executor SKILL.md must exist")
-        content = self.architect_skill.read_text(encoding="utf-8")
-        self.assertIn("3.7 Flash", content)
-        self.assertIn("3.1 Pro", content)
-        self.assertIn('Model: "pro"', content)
-        self.assertIn('Model: "flash"', content)
-        self.assertIn("git diff", content)
-        self.assertIn("AUDIT VERDICT", content)
+    def test_architect_executor_retired(self):
+        # architect-executor merged into goal-audit; must not exist as separate skill
+        arch = ROOT / "tui-agent-settings" / "skills" / "architect-executor" / "SKILL.md"
+        alt = ROOT / "skills" / "architect-executor" / "SKILL.md"
+        self.assertFalse(arch.exists(), "architect-executor should be removed (merged into goal-audit)")
+        self.assertFalse(alt.exists(), "architect-executor should be removed (merged into goal-audit)")
 
     def test_goal_audit_skill_contract(self):
         self.assertTrue(self.goal_audit_skill.exists(), "goal-audit SKILL.md must exist")

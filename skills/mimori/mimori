@@ -6,7 +6,7 @@ Zero external dependencies - Python standard library only.
 
 from __future__ import annotations
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import argparse
 import array
@@ -44,6 +44,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 AST_GREP_BIN: Optional[str] = shutil.which("ast-grep")
 TREE_SITTER_BIN: Optional[str] = shutil.which("tree-sitter")
+
+
+def _debug(msg: str) -> None:
+    """Degrade-path diagnostics for silent exception swallows. Enabled with MIMORI_DEBUG=1."""
+    if os.environ.get("MIMORI_DEBUG"):
+        print(f"[mimori:debug] {msg}", file=sys.stderr)
 
 # Used only when the repo is not a git checkout; inside git, `git ls-files` is
 # the authority on what is visible (it implements .gitignore correctly).
@@ -779,8 +785,8 @@ def parse_ast_grep(full_path: Path, ext: str) -> Optional[Tuple[Optional[str], L
 
                 if symbols or imports:
                     return None, symbols, imports
-    except Exception:
-        pass
+    except Exception as e:
+        _debug(f"ast-grep probe failed on {full_path}: {e!r}")
     return None
 
 
@@ -992,6 +998,103 @@ def compute_pagerank(infos: Dict[str, FileInfo], damping: float = 0.85, iters: i
     return {nodes[i]: rank[i] for i in range(n)}
 
 
+class _GraphCtx:
+    """Shared resolution context passed to spec resolvers."""
+    __slots__ = ("paths", "py_index", "aliases", "go_mod", "cargo_crate")
+
+    def __init__(self, paths: Set[str], py_index: Dict[str, Set[str]],
+                 aliases: List[Tuple[str, List[str]]], go_mod: Optional[str],
+                 cargo_crate: Optional[str]):
+        self.paths = paths
+        self.py_index = py_index
+        self.aliases = aliases
+        self.go_mod = go_mod
+        self.cargo_crate = cargo_crate
+
+
+def _resolve_py_abs_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    hit = _resolve_py_module(spec[1], ctx.py_index)
+    return [hit] if hit else []
+
+
+def _resolve_py_rel_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    _, level, module = spec
+    base = Path(source).parent
+    for _ in range(level - 1):
+        base = base.parent
+    stem = (base / module.replace(".", "/")).as_posix().lstrip("./")
+    for cand in (f"{stem}.py", f"{stem}/__init__.py"):
+        if cand in ctx.paths:
+            return [cand]
+    return []
+
+
+def _resolve_js_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    js_spec = spec[1]
+    if js_spec.startswith("."):
+        hit = _resolve_rel_path(source, js_spec, ctx.paths)
+    else:
+        hit = _resolve_alias(js_spec, ctx.aliases, ctx.paths)
+    return [hit] if hit else []
+
+
+def _resolve_go_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    # Go packages fan out: one import edge per .go file under the package dir.
+    go_spec = spec[1]
+    if not (ctx.go_mod and go_spec.startswith(ctx.go_mod)):
+        return []
+    sub = go_spec[len(ctx.go_mod):].lstrip("/")
+    return [c for c in ctx.paths
+            if c.startswith(sub + "/") and c.endswith(".go") and c != source]
+
+
+def _resolve_rs_mod_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    mod_name = spec[1]
+    src_parent = Path(source).parent.as_posix().lstrip("./")
+    prefix = f"{src_parent}/" if src_parent and src_parent != "." else ""
+    for cand in (f"{prefix}{mod_name}.rs", f"{prefix}{mod_name}/mod.rs", f"src/{mod_name}.rs", f"src/{mod_name}/mod.rs"):
+        norm = os.path.normpath(cand)
+        if norm in ctx.paths and norm != source:
+            return [norm]
+    return []
+
+
+def _resolve_rs_use_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    use_path = spec[1]
+    if not use_path.startswith("crate::"):
+        return []
+    parts = use_path[7:].split("::")
+    stem = "/".join(parts)
+    for cand in (f"src/{stem}.rs", f"src/{stem}/mod.rs", f"{stem}.rs", f"{stem}/mod.rs"):
+        norm = os.path.normpath(cand)
+        if norm in ctx.paths and norm != source:
+            return [norm]
+    return []
+
+
+def _resolve_rb_req_spec(spec: tuple, source: str, ctx: _GraphCtx) -> List[str]:
+    rb_spec = spec[1]
+    if rb_spec.startswith("."):
+        hit = _resolve_rel_path(source, rb_spec, ctx.paths) or _resolve_rel_path(source, rb_spec + ".rb", ctx.paths)
+        return [hit] if hit else []
+    for cand in (f"{rb_spec}.rb", f"lib/{rb_spec}.rb", f"app/{rb_spec}.rb", f"{rb_spec}"):
+        norm = os.path.normpath(cand)
+        if norm in ctx.paths and norm != source:
+            return [norm]
+    return []
+
+
+_SPEC_RESOLVERS = {
+    "py_abs": _resolve_py_abs_spec,
+    "py_rel": _resolve_py_rel_spec,
+    "js_spec": _resolve_js_spec,
+    "go_spec": _resolve_go_spec,
+    "rs_mod": _resolve_rs_mod_spec,
+    "rs_use": _resolve_rs_use_spec,
+    "rb_req": _resolve_rb_req_spec,
+}
+
+
 def build_import_graph(infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]],
                        aliases: List[Tuple[str, List[str]]],
                        go_mod: Optional[str] = None,
@@ -999,74 +1102,23 @@ def build_import_graph(infos: Dict[str, FileInfo], py_index: Dict[str, Set[str]]
     """Populate `importers` so in-degree can rank structurally central modules.
 
     Resolves Python (via ast), JS/TS (relative & tsconfig aliases), Go (via go.mod),
-    and Rust (via Cargo.toml / mod.rs / crate:: paths).
+    and Rust (via Cargo.toml / mod.rs / crate:: paths) through _SPEC_RESOLVERS;
+    each resolver returns candidate target paths for a single import spec.
     """
-    paths = set(infos)
+    ctx = _GraphCtx(set(infos), py_index, aliases, go_mod, cargo_crate)
     for source, info in infos.items():
         for spec in info.imports:
-            target = None
-            if spec[0] == "py_abs":
-                target = _resolve_py_module(spec[1], py_index)
-            elif spec[0] == "py_rel":
-                _, level, module = spec
-                base = Path(source).parent
-                for _ in range(level - 1):
-                    base = base.parent
-                stem = (base / module.replace(".", "/")).as_posix().lstrip("./")
-                for cand in (f"{stem}.py", f"{stem}/__init__.py"):
-                    if cand in paths:
-                        target = cand
-                        break
-            elif spec[0] == "js_spec":
-                js_spec = spec[1]
-                target = (_resolve_rel_path(source, js_spec, paths) if js_spec.startswith(".")
-                          else _resolve_alias(js_spec, aliases, paths))
-            elif spec[0] == "go_spec":
-                go_spec = spec[1]
-                if go_mod and go_spec.startswith(go_mod):
-                    sub = go_spec[len(go_mod):].lstrip("/")
-                    for cand in paths:
-                        if cand.startswith(sub + "/") and cand.endswith(".go") and cand != source:
-                            infos[cand].importers.add(source)
-                            info.depends_on.add(cand)
+            resolver = _SPEC_RESOLVERS.get(spec[0])
+            if resolver is None:
+                _debug(f"unknown import spec tag {spec[0]!r} in {source}")
                 continue
-            elif spec[0] == "rs_mod":
-                mod_name = spec[1]
-                src_parent = Path(source).parent.as_posix().lstrip("./")
-                prefix = f"{src_parent}/" if src_parent and src_parent != "." else ""
-                for cand in (f"{prefix}{mod_name}.rs", f"{prefix}{mod_name}/mod.rs", f"src/{mod_name}.rs", f"src/{mod_name}/mod.rs"):
-                    norm = os.path.normpath(cand)
-                    if norm in paths and norm != source:
-                        target = norm
-                        break
-            elif spec[0] == "rs_use":
-                use_path = spec[1]
-                if use_path.startswith("crate::"):
-                    parts = use_path[7:].split("::")
-                    stem = "/".join(parts)
-                    for cand in (f"src/{stem}.rs", f"src/{stem}/mod.rs", f"{stem}.rs", f"{stem}/mod.rs"):
-                        norm = os.path.normpath(cand)
-                        if norm in paths and norm != source:
-                            target = norm
-                            break
-            elif spec[0] == "rb_req":
-                rb_spec = spec[1]
-                if rb_spec.startswith("."):
-                    target = _resolve_rel_path(source, rb_spec, paths)
-                    if not target:
-                        target = _resolve_rel_path(source, rb_spec + ".rb", paths)
-                else:
-                    for cand in (f"{rb_spec}.rb", f"lib/{rb_spec}.rb", f"app/{rb_spec}.rb", f"{rb_spec}"):
-                        norm = os.path.normpath(cand)
-                        if norm in paths and norm != source:
-                            target = norm
-                            break
+            for target in resolver(spec, source, ctx):
+                if target != source and target in infos:
+                    infos[target].importers.add(source)
+                    info.depends_on.add(target)
 
-            if target and target != source and target in infos:
-                infos[target].importers.add(source)
-                info.depends_on.add(target)
-
-
+# --------------------------------------------------------------------------
+# entry points
 # --------------------------------------------------------------------------
 # entry points
 # --------------------------------------------------------------------------
@@ -1103,7 +1155,8 @@ def detect_entry_points(root: Path, infos: Dict[str, FileInfo], py_index: Dict[s
                     cand = os.path.normpath((base / str(target)).as_posix())
                     if cand in infos:
                         infos[cand].entry = True
-        except Exception:
+        except Exception as e:
+            _debug(f"entry-point config parse failed for {rel}: {e!r}")
             continue
 
 
@@ -1148,8 +1201,8 @@ def collect_repo(root: Path) -> Dict[str, FileInfo]:
         for p, v in pr.items():
             if p in infos:
                 infos[p].pagerank = v
-    except Exception:
-        pass
+    except Exception as e:
+        _debug(f"pagerank failed (rankings fall back to in-degree): {e!r}")
     return infos
 
 
@@ -1941,9 +1994,16 @@ def scan_stale_references(root: Path, all_paths: Set[str]) -> List[str]:
                 continue
             if " " in ref or "(" in ref or ")" in ref:
                 continue
-            if "/" in ref or any(ref.endswith(ext) for ext in CODE_EXTS | {".md", ".json", ".jsonl", ".sh", ".toml", ".yml", ".yaml"}):
-                clean_ref = ref.lstrip("./").split("#")[0].split(":")[0]
+            has_ext = any(ref.endswith(ext) for ext in CODE_EXTS | {".md", ".json", ".jsonl", ".sh", ".toml", ".yml", ".yaml"})
+            if "/" in ref or has_ext:
+                clean_ref = ref.removeprefix("./").rstrip("/").split("#")[0].split(":")[0]
                 if not clean_ref:
+                    continue
+                if ref.startswith("/") and not has_ext:
+                    continue
+                if ref.startswith("/") and Path(ref).exists():
+                    continue
+                if (root / clean_ref).is_dir() or (root / clean_ref).is_file():
                     continue
                 if clean_ref.lower() not in all_paths_lower and clean_ref.lower() not in all_stems_lower:
                     dead_refs.add(f"{fname}: '{clean_ref}' not found in repo")
@@ -2098,6 +2158,194 @@ def cmd_clean(args: argparse.Namespace) -> int:
     return 0
 
 
+def _normalize_todo_action(action: str, target: str) -> Tuple[str, str]:
+    """Valid action names pass through; anything else is treated as a list search query."""
+    valid_actions = {"list", "ls", "add", "start", "done", "reopen", "rm", "remove"}
+    if action not in valid_actions:
+        target = f"{action} {target}".strip() if target else action
+        action = "list"
+    return action, target
+
+
+def _filter_task_sections(
+    sections: List[Tuple[str, List[Any]]],
+    status_filter: str,
+    tag_filters: List[str],
+    search_query: str,
+) -> List[Tuple[str, List[TaskItem]]]:
+    """Returns (heading, [TaskItem]) pairs whose items match status/tag/search filters."""
+    out: List[Tuple[str, List[TaskItem]]] = []
+    for heading, items in sections:
+        matching = [
+            it for it in items
+            if isinstance(it, TaskItem)
+            and (status_filter == "all" or it.status == status_filter)
+            and (not tag_filters or any(tf in [t.lower() for t in it.tags] for tf in tag_filters))
+            and (not search_query
+                 or search_query in it.text.lower()
+                 or any(search_query in t.lower() for t in it.tags))
+        ]
+        if matching:
+            out.append((heading, matching))
+    return out
+
+
+def _section_heading_color(heading: str) -> str:
+    head_low = heading.lower()
+    if "in progress" in head_low or "in-progress" in head_low:
+        return "1;36"
+    if "idea" in head_low or "backlog" in head_low:
+        return "1;35"
+    if "complete" in head_low or "done" in head_low:
+        return "1;32"
+    return "1;33"
+
+
+_STATUS_BOX = {
+    "in_progress": ("[/]", "1;36"),
+    "idea": ("[?]", "1;35"),
+    "done": ("[x]", "1;32"),
+    "todo": ("[ ]", "1;33"),
+}
+
+
+def _format_task_line(it: TaskItem, plain: bool) -> str:
+    idx_str = colorize(f"#{it.index}", "2", plain=plain)
+    box, box_color = _STATUS_BOX.get(it.status, ("[ ]", "1;33"))
+    box_str = colorize(box, box_color, plain=plain)
+    prio_str = ""
+    if it.prio:
+        p_code = "1;31" if it.prio in ("high", "urgent", "p0", "p1") else "1;33" if it.prio in ("med", "p2") else "1;34"
+        prio_str = colorize(f"({it.prio}) ", p_code, plain=plain)
+    tags_str = "".join(colorize(f"[{t}]", "36", plain=plain) + " " for t in it.tags)
+    date_str = ""
+    if it.completed_date and it.status == "done":
+        date_str = colorize(f" ({it.completed_date})", "2", plain=plain)
+    return f"  {idx_str} {box_str} {prio_str}{tags_str}{it.text}{date_str}"
+
+
+def _render_task_list(
+    filtered_sections: List[Tuple[str, List[TaskItem]]],
+    tasks_file: Path,
+    root: Path,
+    plain: bool,
+    status_filter: str,
+    search_query: str,
+) -> None:
+    print(colorize(f"# Tasks & Backlog ({tasks_file.relative_to(root)})", "1;37", plain=plain))
+    print()
+    for heading, items in filtered_sections:
+        hdr_color = _section_heading_color(heading)
+        head_low = heading.lower()
+        is_completed_section = "complete" in head_low or "done" in head_low
+        hidden_count = 0
+        display_items = items
+        if is_completed_section and len(items) > 5 and status_filter == "all" and not search_query:
+            hidden_count = len(items) - 5
+            display_items = items[-5:]
+
+        hdr_text = heading.lstrip("#").strip()
+        if hidden_count > 0:
+            hdr_text += f" ({len(display_items)} shown, {hidden_count} hidden)"
+        print(colorize(f"[{hdr_text}]", hdr_color, plain=plain))
+
+        for it in display_items:
+            print(_format_task_line(it, plain))
+        print()
+
+
+def _todo_list(args: argparse.Namespace, sections: List[Tuple[str, List[Any]]],
+               tasks_file: Path, root: Path, target: str) -> int:
+    status_filter = getattr(args, "status", "all")
+    tag_filters = [t.lower() for t in getattr(args, "tag", []) if t]
+    plain = getattr(args, "plain", False)
+    search_query = target.lower() if target else ""
+
+    filtered = _filter_task_sections(sections, status_filter, tag_filters, search_query)
+    if not filtered:
+        if search_query or status_filter != "all" or tag_filters:
+            print("No tasks matching filters.")
+        else:
+            print("No active tasks.")
+        return 0
+
+    _render_task_list(filtered, tasks_file, root, plain, status_filter, search_query)
+    return 0
+
+
+def _todo_add(args: argparse.Namespace, target: str, preamble: str,
+              sections: List[Tuple[str, List[Any]]], tasks_file: Path) -> int:
+    if not target:
+        print("Error: task description required. Usage: mimori todo add <description> [--prio high|med|low] [--tag tag] [--start] [--idea]")
+        return 1
+
+    is_idea = getattr(args, "idea", False)
+    is_start = getattr(args, "start", False)
+    prio = getattr(args, "prio", None)
+    tags = getattr(args, "tag", []) or []
+
+    if is_idea:
+        target_type, status = "ideas", "idea"
+    elif is_start:
+        target_type, status = "in_progress", "in_progress"
+    else:
+        target_type, status = "active", "todo"
+
+    s_idx = ensure_task_section(sections, target_type)
+    new_item = TaskItem(
+        raw_line="",
+        section_idx=s_idx,
+        section_name=sections[s_idx][0],
+        status=status,
+        text=target,
+        prio=prio,
+        tags=tags,
+    )
+    sections[s_idx][1].append(new_item)
+    atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
+    get_all_tasks(sections)  # recompute global indexes after append
+    print(f"Added task #{new_item.index} to {sections[s_idx][0].lstrip('#').strip()}: {new_item.text}")
+    return 0
+
+
+def _move_task(sections: List[Tuple[str, List[Any]]], task: TaskItem,
+               dest_type: str, status: str, completed_date: Optional[str]) -> None:
+    """Relocates a task across sections, updating status/date/section fields in place."""
+    sections[task.section_idx][1].remove(task)
+    dest_idx = ensure_task_section(sections, dest_type)
+    task.status = status
+    task.completed_date = completed_date
+    task.section_idx = dest_idx
+    task.section_name = sections[dest_idx][0]
+    sections[dest_idx][1].append(task)
+
+
+def _transition_task(sections: List[Tuple[str, List[Any]]], all_tasks: List[TaskItem],
+                     target: str, dest_type: str, status: str, completed_date: Optional[str],
+                     past: str, dest_display: str, tasks_file: Path, preamble: str) -> int:
+    """Shared body of start/done/reopen: resolve task, move it, persist, report."""
+    task, err = find_matching_task(all_tasks, target)
+    if err:
+        print(f"Error: {err}")
+        return 1
+    _move_task(sections, task, dest_type, status, completed_date)
+    atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
+    print(f"{past} task #{task.index}: {task.text} (moved to {dest_display})")
+    return 0
+
+
+def _todo_remove(sections: List[Tuple[str, List[Any]]], all_tasks: List[TaskItem],
+                 target: str, tasks_file: Path, preamble: str) -> int:
+    task, err = find_matching_task(all_tasks, target)
+    if err:
+        print(f"Error: {err}")
+        return 1
+    sections[task.section_idx][1].remove(task)
+    atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
+    print(f"Removed task #{task.index}: {task.text}")
+    return 0
+
+
 def cmd_todo(args: argparse.Namespace) -> int:
     root = find_repo_root()
     mimori_dir = get_mimori_dir(root)
@@ -2107,14 +2355,7 @@ def cmd_todo(args: argparse.Namespace) -> int:
     action = getattr(args, "action", "list") or "list"
     target_raw = getattr(args, "target", [])
     target = " ".join(target_raw).strip() if isinstance(target_raw, list) else str(target_raw).strip()
-
-    valid_actions = {"list", "ls", "add", "start", "done", "reopen", "rm", "remove"}
-    if action not in valid_actions:
-        if target:
-            target = f"{action} {target}".strip()
-        else:
-            target = action
-        action = "list"
+    action, target = _normalize_todo_action(action, target)
 
     if not tasks_file.exists():
         if action == "add":
@@ -2129,184 +2370,22 @@ def cmd_todo(args: argparse.Namespace) -> int:
     preamble, sections = parse_tasks_document(content)
     all_tasks = get_all_tasks(sections)
 
-    if action in ("list", "ls"):
-        status_filter = getattr(args, "status", "all")
-        tag_filters = [t.lower() for t in getattr(args, "tag", []) if t]
-        plain = getattr(args, "plain", False)
-        search_query = target.lower() if target else ""
-
-        filtered_sections: List[Tuple[str, List[TaskItem]]] = []
-        for heading, items in sections:
-            matching_items = []
-            for it in items:
-                if not isinstance(it, TaskItem):
-                    continue
-                if status_filter != "all" and it.status != status_filter:
-                    continue
-                if tag_filters and not any(tf in [t.lower() for t in it.tags] for tf in tag_filters):
-                    continue
-                if search_query and (search_query not in it.text.lower() and not any(search_query in t.lower() for t in it.tags)):
-                    continue
-                matching_items.append(it)
-            if matching_items:
-                filtered_sections.append((heading, matching_items))
-
-        if not filtered_sections:
-            if search_query or status_filter != "all" or tag_filters:
-                print("No tasks matching filters.")
-            else:
-                print("No active tasks.")
-            return 0
-
-        print(colorize(f"# Tasks & Backlog ({tasks_file.relative_to(root)})", "1;37", plain=plain))
-        print()
-
-        for heading, items in filtered_sections:
-            head_low = heading.lower()
-            if "in progress" in head_low or "in-progress" in head_low:
-                hdr_color = "1;36"
-            elif "idea" in head_low or "backlog" in head_low:
-                hdr_color = "1;35"
-            elif "complete" in head_low or "done" in head_low:
-                hdr_color = "1;32"
-            else:
-                hdr_color = "1;33"
-
-            is_completed_section = "complete" in head_low or "done" in head_low
-            hidden_count = 0
-            display_items = items
-            if is_completed_section and len(items) > 5 and status_filter == "all" and not search_query:
-                hidden_count = len(items) - 5
-                display_items = items[-5:]
-
-            hdr_text = heading.lstrip("#").strip()
-            if hidden_count > 0:
-                hdr_text += f" ({len(display_items)} shown, {hidden_count} hidden)"
-            print(colorize(f"[{hdr_text}]", hdr_color, plain=plain))
-
-            for it in display_items:
-                idx_str = colorize(f"#{it.index}", "2", plain=plain)
-                if it.status == "in_progress":
-                    box_str = colorize("[/]", "1;36", plain=plain)
-                elif it.status == "idea":
-                    box_str = colorize("[?]", "1;35", plain=plain)
-                elif it.status == "done":
-                    box_str = colorize("[x]", "1;32", plain=plain)
-                else:
-                    box_str = colorize("[ ]", "1;33", plain=plain)
-
-                prio_str = ""
-                if it.prio:
-                    p_code = "1;31" if it.prio in ("high", "urgent", "p0", "p1") else "1;33" if it.prio in ("med", "p2") else "1;34"
-                    prio_str = colorize(f"({it.prio}) ", p_code, plain=plain)
-
-                tags_str = ""
-                if it.tags:
-                    tags_str = "".join(colorize(f"[{t}]", "36", plain=plain) + " " for t in it.tags)
-
-                date_str = ""
-                if it.completed_date and it.status == "done":
-                    date_str = colorize(f" ({it.completed_date})", "2", plain=plain)
-
-                print(f"  {idx_str} {box_str} {prio_str}{tags_str}{it.text}{date_str}")
-            print()
-        return 0
-
-    elif action == "add":
-        if not target:
-            print("Error: task description required. Usage: mimori todo add <description> [--prio high|med|low] [--tag tag] [--start] [--idea]")
-            return 1
-
-        is_idea = getattr(args, "idea", False)
-        is_start = getattr(args, "start", False)
-        prio = getattr(args, "prio", None)
-        tags = getattr(args, "tag", []) or []
-
-        if is_idea:
-            target_type = "ideas"
-            status = "idea"
-        elif is_start:
-            target_type = "in_progress"
-            status = "in_progress"
-        else:
-            target_type = "active"
-            status = "todo"
-
-        s_idx = ensure_task_section(sections, target_type)
-        new_item = TaskItem(
-            raw_line="",
-            section_idx=s_idx,
-            section_name=sections[s_idx][0],
-            status=status,
-            text=target,
-            prio=prio,
-            tags=tags,
-        )
-        sections[s_idx][1].append(new_item)
-        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
-        all_tasks = get_all_tasks(sections)
-        print(f"Added task #{new_item.index} to {sections[s_idx][0].lstrip('#').strip()}: {new_item.text}")
-        return 0
-
-    elif action == "start":
-        task, err = find_matching_task(all_tasks, target)
-        if err:
-            print(f"Error: {err}")
-            return 1
-        sections[task.section_idx][1].remove(task)
-        dest_idx = ensure_task_section(sections, "in_progress")
-        task.status = "in_progress"
-        task.completed_date = None
-        task.section_idx = dest_idx
-        task.section_name = sections[dest_idx][0]
-        sections[dest_idx][1].append(task)
-        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
-        print(f"Started task #{task.index}: {task.text} (moved to In Progress)")
-        return 0
-
-    elif action == "done":
-        task, err = find_matching_task(all_tasks, target)
-        if err:
-            print(f"Error: {err}")
-            return 1
-        sections[task.section_idx][1].remove(task)
-        dest_idx = ensure_task_section(sections, "completed")
-        task.status = "done"
-        task.completed_date = datetime.date.today().isoformat()
-        task.section_idx = dest_idx
-        task.section_name = sections[dest_idx][0]
-        sections[dest_idx][1].append(task)
-        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
-        print(f"Completed task #{task.index}: {task.text} (moved to Completed)")
-        return 0
-
-    elif action == "reopen":
-        task, err = find_matching_task(all_tasks, target)
-        if err:
-            print(f"Error: {err}")
-            return 1
-        sections[task.section_idx][1].remove(task)
-        dest_idx = ensure_task_section(sections, "active")
-        task.status = "todo"
-        task.completed_date = None
-        task.section_idx = dest_idx
-        task.section_name = sections[dest_idx][0]
-        sections[dest_idx][1].append(task)
-        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
-        print(f"Reopened task #{task.index}: {task.text} (moved to Active Tasks)")
-        return 0
-
-    elif action in ("rm", "remove"):
-        task, err = find_matching_task(all_tasks, target)
-        if err:
-            print(f"Error: {err}")
-            return 1
-        sections[task.section_idx][1].remove(task)
-        atomic_write_text(tasks_file, serialize_tasks_document(preamble, sections), encoding="utf-8")
-        print(f"Removed task #{task.index}: {task.text}")
-        return 0
-
-    return 0
+    dispatcher = {
+        "list": lambda: _todo_list(args, sections, tasks_file, root, target),
+        "ls": lambda: _todo_list(args, sections, tasks_file, root, target),
+        "add": lambda: _todo_add(args, target, preamble, sections, tasks_file),
+        "start": lambda: _transition_task(sections, all_tasks, target, "in_progress", "in_progress", None,
+                                          "Started", "In Progress", tasks_file, preamble),
+        "done": lambda: _transition_task(sections, all_tasks, target, "completed", "done",
+                                         datetime.date.today().isoformat(), "Completed", "Completed",
+                                         tasks_file, preamble),
+        "reopen": lambda: _transition_task(sections, all_tasks, target, "active", "todo", None,
+                                           "Reopened", "Active Tasks", tasks_file, preamble),
+        "rm": lambda: _todo_remove(sections, all_tasks, target, tasks_file, preamble),
+        "remove": lambda: _todo_remove(sections, all_tasks, target, tasks_file, preamble),
+    }
+    handler = dispatcher.get(action)
+    return handler() if handler else 0
 
 
 def cmd_idea(args: argparse.Namespace) -> int:
@@ -2385,7 +2464,9 @@ class DebtItem:
     def format_line(self) -> str:
         dup_tag = f" [duplicate x{len(self.duplicates) + 1}]" if self.duplicates else ""
         trig_tag = "" if self.has_trigger else " [no-trigger]"
-        return f"{self.location}: {self.what} <- {self.ceiling} -> {self.trigger or 'unspecified'}{trig_tag}{dup_tag}"
+        # Omit redundant ceiling: 'X <- X -> Y' is ledger noise when ceiling repeats what.
+        mid = f" <- {self.ceiling}" if self.ceiling and self.ceiling != self.what else ""
+        return f"{self.location}: {self.what}{mid} -> {self.trigger or 'unspecified'}{trig_tag}{dup_tag}"
 
 
 def _has_valid_trigger(trigger_text: str) -> bool:
@@ -2470,10 +2551,11 @@ def scan_ponytail_debt(root: Path, files: Optional[List[str]] = None) -> List[De
                 trigger = m_u.group(1).strip() if m_u else ""
                 what = full_comment.split("ceiling:")[0].strip().rstrip(",;")
             elif "," in full_comment:
+                # comma format is "what, upgrade trigger when..." — there is no ceiling in this style
                 parts = full_comment.split(",", 1)
-                ceiling = parts[0].strip()
+                what = parts[0].strip()
+                ceiling = ""
                 trigger = parts[1].strip()
-                what = ceiling
             else:
                 what = full_comment
                 ceiling = full_comment
@@ -2588,7 +2670,8 @@ def cmd_debt(args: argparse.Namespace) -> int:
         new_debt_lines = ["## KNOWN DEBT", ""]
         new_debt_lines.extend(manual_entries)
         for it in items:
-            new_debt_lines.append(f"- {it.file}:{it.lineno}: {it.what} <- {it.ceiling} -> {it.trigger or 'unspecified'}")
+            mid = f" <- {it.ceiling}" if it.ceiling and it.ceiling != it.what else ""
+            new_debt_lines.append(f"- {it.file}:{it.lineno}: {it.what}{mid} -> {it.trigger or 'unspecified'}")
 
         if len(new_debt_lines) > 32:
             new_debt_lines = new_debt_lines[:32]
@@ -3207,10 +3290,22 @@ def _test_debt_system(root: Path) -> None:
     (debt_dir / "notes.md").write_text("# Notes\nponytail: should be ignored in prose\n", encoding="utf-8")
     (debt_dir / "data.json").write_text('{"summary": "ponytail: should be ignored in json"}\n', encoding="utf-8")
 
+    # comma-style marker (no arrows): what must stay the full comment, never aliased to ceiling
+    (debt_dir / "comma.py").write_text(
+        "# ponytail: naive text move, misses re-exports, use LSP when multi-file moves are requested\n"
+        "def move(): pass\n",
+        encoding="utf-8"
+    )
+
     files = list_files(debt_dir)
     items = scan_ponytail_debt(debt_dir, files)
 
-    assert len(items) == 4, f"Expected 4 debt items, got {len(items)}: {[it.file for it in items]}"
+    assert len(items) == 5, f"Expected 5 debt items, got {len(items)}: {[it.file for it in items]}"
+
+    comma_item = next(it for it in items if it.file == "comma.py")
+    assert comma_item.what != comma_item.ceiling, "comma-fallback must not alias what to ceiling (garbled ledger)"
+    assert "naive text move" in comma_item.what and "LSP" in comma_item.trigger
+    assert "<- " not in comma_item.format_line(), f"redundant ceiling leaked into format: {comma_item.format_line()!r}"
 
     client_item = next(it for it in items if it.file == "client.ts")
     assert not client_item.has_trigger, "client.ts marker must be flagged as no-trigger"
@@ -3285,6 +3380,35 @@ def _test_atomic_locking_and_concurrency(root: Path) -> None:
         globals()["find_repo_root"] = orig_find_repo_root
 
 
+# ponytail: 31 legacy functions still exceed the 10-CC ceiling (cmd_debt@42, clip_tasks@33, generate_repo_map@38, scan_ponytail_debt@38) <-
+#   general gate held at 42 to stay green -> systemic decompose pass (task: 'mimori global CC<=10 pass') once over-10 count < 20
+def _test_complexity_budget() -> None:
+    """CC gate: refactored hotspots stay flat; no function regresses past 42."""
+    import ast as _ast
+
+    def cc(node) -> int:
+        n = 1
+        for ch in _ast.walk(node):
+            if isinstance(ch, (ast.If, ast.While, ast.For, ast.ExceptHandler, ast.IfExp, ast.Assert)):
+                n += 1
+            elif isinstance(ch, ast.BoolOp):
+                n += len(ch.values) - 1
+            elif isinstance(ch, ast.comprehension):
+                n += 1 + len(ch.ifs)
+        return n
+
+    tree = _ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    offenders = []
+    hotspots = {"cmd_todo": 10, "build_import_graph": 10}
+    for node in _ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            score = cc(node)
+            limit = hotspots.get(node.name, 42)
+            if score > limit:
+                offenders.append(f"{node.name}:{node.lineno} CC={score}>{limit}")
+    assert not offenders, f"Complexity budget exceeded: {offenders}"
+
+
 def run_self_test() -> int:
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir).resolve()
@@ -3305,6 +3429,7 @@ def run_self_test() -> int:
         _test_staleness_scanner(root)
         _test_debt_system(root)
         _test_atomic_locking_and_concurrency(root)
+    _test_complexity_budget()
     print("Self-test passed successfully.")
     return 0
 

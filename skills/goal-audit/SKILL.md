@@ -4,6 +4,7 @@ description: >-
   Deterministic goal drafting, verification contract execution, and detached subagent auditing.
   Enforces the anti-bamboozle rule (GLLA protocol) where work cannot self-grade or complete without
   independent machine-verifiable proof. Use for long-running, multi-file, or unattended work.
+disable-model-invocation: true
 ---
 
 # Goal-Audit (GLLA Protocol)

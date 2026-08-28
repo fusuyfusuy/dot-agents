@@ -217,7 +217,7 @@ mimori clean --all
 
 ```
 .mimori/
-├── memory.md        # Domain rules, invariants, gotchas, ## KNOWN DEBT
+├── memory.md        # Domain rules, invariants, gotchas, ## Flagged ambiguities, ## KNOWN DEBT
 ├── decisions.md     # ADRs (Context, Decision, Consequences)
 ├── tasks.md         # Tasks ([ ], [/], [x]) and Ideas ([?])
 ├── repo_map.md      # AST structural map output from `mimori map`
