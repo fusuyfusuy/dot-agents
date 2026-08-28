@@ -52,30 +52,33 @@ When AI coding agents enter a codebase, they typically suffer from two extremes:
    - Ranks files and symbols by **import in-degree**, entry-point detection, and recent git churn so the agent sees what actually matters first.
    - Dynamic token-budget management: gracefully collapses lower-ranked directories without silent omission.
 
-3. **Zero-Daemon Task, Todo & Backlog Tracking (`mimori todo` / `mimori idea`)**:
+3. **Deterministic 1-Hop Context Slicing (`mimori slice`)**:
+   - Zero-pollution leaf extraction: `mimori slice <file>[:<symbol>] [--lines 50]` emits coordinates, 1-hop callers (importers) + dependencies, contract/signature, and bounded source slice.
+   - Fuzzy file/symbol resolve (`token.py:verify_jwt`, `FileInfo`) + exact AST range for Python; `120 tokens vs 3k` whole-file read. Tree traversal: `map --focus` → `slice` → `read L40-L75`.
+
+4. **Zero-Daemon Task, Todo & Backlog Tracking (`mimori todo` / `mimori idea`)**:
    - Built-in CLI for in-progress tasks (`[/]`), pending action items (`[ ]`), and exploratory future ideas (`[?]`) stored in `.mimori/tasks.md`.
    - Priority tagging (`--prio high|med|low`), component tags (`--tag perf`), lifecycle state transitions (`start`, `done`, `reopen`, `promote`), and token-budgeted snapshot summaries.
 
-4. **Automated Memory & Task Staleness/Rot Decay Scanner**:
+5. **Automated Memory & Task Staleness/Rot Decay Scanner**:
    - Scans `.mimori/memory.md` and `.mimori/tasks.md` for dead file paths or nonexistent symbols.
    - Emits non-intrusive decay alerts in `mimori dump` to prompt active pruning before knowledge rots.
 
-5. **Architecture Decision Records (`mimori decisions`)**:
+6. **Architecture Decision Records (`mimori decisions`)**:
    - Maintains immutable ADRs in `.mimori/decisions.md` following the Context → Decision → Consequences pattern.
    - Automatically surfaces active architectural invariants while keeping superseded decisions compact.
 
-6. **1-Line Caveman Action Logging (`mimori log`)**:
+7. **1-Line Caveman Action Logging (`mimori log`)**:
    - Machine-action telemetry recorded into `.mimori/activity.jsonl` with author metadata, modified files, and concise caveman summaries for all repository actions and tooling runs.
 
-7. **Ponytail Technical Debt Scanner & Reconciler (`mimori debt`)**:
+8. **Ponytail Technical Debt Scanner & Reconciler (`mimori debt`)**:
    - Zero-daemon 2-pass scanner for in-code `# ponytail:` / `// ponytail:` deferral comments.
    - Parses multi-line ceilings and upgrade triggers, flagging `[no-trigger]` and `[duplicate]` issues.
    - `mimori debt sync`: Synchronizes code markers into `.mimori/memory.md` (`## KNOWN DEBT`), automatically pruning resolved debt while honoring the 30-line cap and preserving manual entries.
    - `mimori debt check`: CI validation gate (exits 0 if clean, 1 if broken triggers exist).
 
-8. **Self-Cleaning Temp Cache (`mimori clean`)**:
+9. **Self-Cleaning Temp Cache (`mimori clean`)**:
    - Opportunistic in-flight garbage collection on `dump --file`: retains the 2 newest snapshots per repo, auto-expires files older than 72h, and caps total temp files.
-
 ---
 
 ## 📦 Installation
@@ -124,6 +127,11 @@ mimori map
 
 # Focused map on a specific subsystem
 mimori map --stdout --focus "auth.py,api"
+
+# Deterministic 1-hop slice — callers, deps, contract, bounded code (zero pollution)
+mimori slice src/auth/token.py:verify_jwt
+mimori slice src/engine/core.py --lines 50
+mimori slice token.py:verify_jwt               # fuzzy file/symbol resolve
 
 # Record a completed action or tooling execution (1-line caveman style)
 mimori log --action "add-auth" --summary "Added JWT auth middleware" --files "auth.py,server.py"
@@ -178,26 +186,21 @@ cp SKILL.md ~/.pi/skills/mimori/
 
 ### 2. Drop-in `AGENTS.md` / `CLAUDE.md` Settings Section
 
-Paste this configuration into your project root's `AGENTS.md` or `CLAUDE.md` to establish strict memory hygiene, surgical context exploration, and debt governance:
-
 ```markdown
 ## Project Memory & Lifecycle Protocol (mimori)
 
 ### 1. Explore -> Plan -> Approve -> Execute -> Verify
-- **Explore**: Orient surgically without reading full files.
-  - Snapshot full workspace context: `mimori dump --file`
-  - Focus on a specific subsystem: `mimori dump --focus "auth,api"`
-  - Live AST call/import inspection: `mimori map --stdout --focus "<target>"`
+- **Explore — Tree Traversal (Zero Pollution, MUST)**: (1) **Canopy** `mimori map --stdout --focus "<target>"` for ranking/in-degree; (2) **Contract** inspect public types at boundary, prune rest; (3) **1-Hop Slice** `mimori slice <file>[:<symbol>]` for callers+deps+slice; (4) **Leaf** exact `file.py#L40-L75`. Whole-file reads >100 lines NEVER — `mimori slice` before `read`.
 - **Plan**: Track multi-step tasks in `mimori todo` (e.g. `mimori todo add "Refactor parser" --start`).
 - **Approve**: Multi-file, API-modifying, or dependency changes require plan review before execution.
 - **Execute**: Deliver shortest working diff. Mark intentional shortcuts with `# ponytail: <what> <- <ceiling> -> <trigger>`.
-- **Verify & Gate**: Run machine-verifiable tests. Ensure zero broken debt markers with `mimori debt check` (exit 0).
+- **Verify & Gate**: Cite slices/maps used (`slice X:42-90`, `map --focus Y`); run machine-verifiable tests; `mimori debt check` (exit 0).
 - **Log**: Record completed repository actions via `mimori log --action <act> --summary <caveman> --files <f1,f2>` (<160 chars).
 
 ### 2. Session Warmup & Hygiene
 - **Warmup**: Run `mimori dump --file` at session start. Never read `.mimori/repo_map.md` directly.
 - **Decay Pruning**: Remove stale/dead file references reported in `mimori dump` decay notices from `.mimori/memory.md`.
-- **Subagent Kickoff**: Scope worker subagents with targeted context: `mimori dump --file --focus "<area>"`.
+- **Subagent Kickoff**: Scope worker subagents with targeted context: `mimori dump --file --focus "<area>"` + `mimori slice <entry>[:<symbol>]`.
 
 ### 3. Debt Governance & Memory Writing Style
 - **Writing Style**: Use Caveman compression (drop filler/articles, retain exact code, paths, numbers, and negations) in `.mimori/memory.md` and ADRs.
@@ -212,8 +215,9 @@ Paste this configuration into your project root's `AGENTS.md` or `CLAUDE.md` to 
 | :--- | :--- | :--- | :--- |
 | **Session Start** | Cold-start warmup & decay check | `mimori dump --file` | ~12k–24k chars cached in temp (saves 50k tokens) |
 | **Subsystem Exploration** | Surgical AST & dependency lookup | `mimori map --stdout --focus "auth"` | Precise top-ranked symbols & callers only |
+| **Leaf Extraction** | 1-hop slice with callers+deps | `mimori slice <file>[:<symbol>] --lines 50` | 120 tokens vs 3k whole-file read |
 | **Task Planning** | Create & activate action items | `mimori todo add "<task>" --start` | Structured state in `.mimori/tasks.md` |
-| **Subagent Scoping** | Isolated worker kickoff context | `mimori dump --file --focus "<target>"` | Minimal targeted context window |
+| **Subagent Scoping** | Isolated worker kickoff context | `mimori dump --file --focus "<target>"` + `mimori slice <entry>[:<symbol>]` | Minimal targeted context window |
 | **Pre-Commit Verification** | Validate debt triggers | `mimori debt check` | Deterministic CI gate (exit 0 / 1) |
 | **Post-Action Journal** | Log discrete repo action | `mimori log --action <a> --summary <s>` | Append to `.mimori/activity.jsonl` |
 
