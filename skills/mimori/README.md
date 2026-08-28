@@ -3,8 +3,9 @@
 [![CI](https://github.com/fusuyfusuy/mimori/actions/workflows/ci.yml/badge.svg)](https://github.com/fusuyfusuy/mimori/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-green.svg)](https://github.com/fusuyfusuy/mimori)
-[![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)](https://github.com/fusuyfusuy/mimori/releases)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0%20(stdlib%20only)-green.svg)](https://github.com/fusuyfusuy/mimori) [![Tiered AST](https://img.shields.io/badge/AST-tiered%20%28works%20without%2C%20better%20with%29-blue.svg)](https://github.com/fusuyfusuy/mimori#tiered-ast-engines--better-with-works-without)
+
+> **Works with zero dependencies. Better with `tree-sitter` / `ast-grep` if you have them — never required.**
 
 > **One file. Zero daemons. Zero deps. Instant orientation.**
 > Single `mimori dump --file` replaces 20 blind `grep/find/read` calls — ranked symbols, ADRs, tasks & debt in <1.5s.
@@ -99,7 +100,19 @@ mimori --version  # 1.4.0
 mimori --test     # self-test + fixtures
 ```
 
-No `pip`, no `npm`, no daemon. One file, ~150KB.
+No `pip`, no `npm`, no daemon. One file, ~150KB. **Zero deps to run.**
+
+**Optional — tiered AST engines (better with, works without):**
+
+```bash
+# Tier 1 — tree-sitter (best fidelity, if Python module available)
+pip install tree_sitter tree_sitter_python tree_sitter_typescript  # or: pip install tree_sitter_languages
+# Tier 2 — ast-grep (structural queries, if binary in PATH)
+npm i -g @ast-grep/cli   # or: cargo install ast-grep | brew install ast-grep
+# Tier 3 — pure stdlib fallback (always works, no install) — mimori auto-degrades
+mimori map --stdout   # shows which tier was used (debug: MIMORI_DEBUG=1)
+```
+> `mimori` auto-detects at runtime: `tree_sitter` Python module → `ast-grep` binary → stdlib regex. Missing tiers never break — just ~10–20% less precise on TS/JS/Go/Rust symbol boundaries. See [Tiered AST Engines](#tiered-ast-engines--better-with-works-without).
 
 ---
 
@@ -140,9 +153,26 @@ mimori clean && mimori clean --all
 
 * **Git is truth.** `git ls-files --cached --others --exclude-standard` — no hand-rolled `.gitignore` parser (old one got negations, trailing globs, scoped patterns all wrong). `os.walk` fallback only for non-git.
 * **PageRank, not heuristics.** Flat `array('i')`/`array('d')` power iteration, dangling-node correction, `delta<1e-7` early exit. Microsecond convergence. Ranks by `in-degree ×4 + PageRank + 90-day churn + entry-point`. Top of map is `components/ui/button.tsx ←39`, `lib/utils.ts ←29` — not alphabetical accident.
-* **Polyglot, honest degradation.** Python `ast` → tree-sitter (if installed) → ast-grep (if installed) → regex → names-only. Never lies about what it parsed. `MIMORI_FORCE_REGEX` escape hatch. `tsconfig` aliases (`@/…` 401:26 in titirek), `go.mod`, `Cargo.toml`/`mod.rs`/`crate::*` — ignored languages get symbols/churn ranking, not fake edges.
+* **Polyglot, honest degradation.** Python `ast` → [Tiered AST Engines](#tiered-ast-engines--better-with-works-without) (`tree-sitter` → `ast-grep` → stdlib regex → names-only). Never lies about what it parsed. `MIMORI_FORCE_REGEX` escape hatch. `tsconfig` aliases (`@/…` 401:26 in titirek), `go.mod`, `Cargo.toml`/`mod.rs`/`crate::*` — ignored languages get symbols/churn ranking, not fake edges.
 * **Budget honesty.** `dump` spends one total budget (`default 24K`, `large 48K`, `immense 96K`) as `memory > decisions > tasks > map > activity`. No silent caps — every collapse prints `Detailed N of M` or `N completed hidden`. `map` is unlimited by default (disk, not context); `dump` is budgeted (context).
 * **No silent failures.** `get_git_branch` → `None` outside git, `detached@<sha>` on detached HEAD (old code faked `main`). `MIMORI_DEBUG=1` surfaces swallowed exceptions (`ast-grep`, `pagerank`, `entry_points`). Stale refs in `memory.md`/`tasks.md` scanned via `scan_stale_references`, shown as decay notices in `dump`.
+
+---
+
+## Tiered AST Engines — Better With, Works Without
+
+`mimori` never requires external dependencies. It probes tiers at runtime, best → fallback, and **never lies** about what it parsed:
+
+| Tier | Engine | Install | What you get | Fallback |
+|---|---|---|---|---|
+| **1** | `tree-sitter` | `pip install tree_sitter tree_sitter_python ...` | Full AST fidelity: precise class/method boundaries, Go/Rust/C++ structs, TSX/JSX | if missing → Tier 2 |
+| **2** | `ast-grep` | `npm i -g @ast-grep/cli` / `brew install ast-grep` / `cargo install ast-grep` | Structural queries: language-aware symbol + import extraction | if missing → Tier 3 |
+| **3** | **stdlib** | _(nothing)_ | `ast` for Python + regex heuristics for others | always works |
+
+* **Detection:** `mimori` checks `import tree_sitter` and `shutil.which("ast-grep")` at startup. No config.
+* **Honesty:** Each file header notes the parser path; `MIMORI_DEBUG=1 mimori map` prints degrade diagnostics.
+* **Coverage:** Tested on Python, TS/JS, Go, Rust, Ruby, C, C++ across `titirek` (162 files) and `opencode` (6,515 files). Unsupported languages → symbols + churn ranking, no fake edges.
+* **Why tiered?** v1.0 was pure regex — correct ranking on Python but missed 94% of `@/` imports in Next.js. Adding tiers fixed `464 vs 26 edges` (titirek) without ever breaking the one-file, zero-deps promise.
 
 ---
 
@@ -156,8 +186,6 @@ mimori clean && mimori clean --all
 | **Aider's repo map** | PageRank idea | Inspiration for mimori; mimori adds budget, decay, tasks, debt, PageRank vectorization |
 
 mimori is page **276** of `mimori-vs-without-*.md` — you can reproduce every number with `mimori dump --file` + `mimori slice`.
-
----
 
 ## Agent harness integration
 
