@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "ast": {
+      "command": "mcp-ast"
+    }
+  }
+}

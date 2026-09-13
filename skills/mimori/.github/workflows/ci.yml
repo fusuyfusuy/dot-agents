@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  determinism:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build
+      - name: byte-identical map gate
+        run: >
+          ./target/debug/mimori map > /tmp/map_a.md &&
+          ./target/debug/mimori map > /tmp/map_b.md &&
+          diff /tmp/map_a.md /tmp/map_b.md &&
+          echo "determinism gate: maps identical"

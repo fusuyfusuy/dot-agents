@@ -1,0 +1,7 @@
+{
+  "name": "akatsuki",
+  "version": "1.0.0",
+  "description": "Bidirectional Knowledge Secretariat gateway to the operator's Phoenix second brain (akatsuki) on TanriZarAtmaz.",
+  "command": "akatsuki",
+  "args": ["mcp"]
+}

@@ -1,0 +1,48 @@
+onboarding = false
+
+[ui]
+agent_panel_sort = "priority"
+
+show_agent_labels_on_pane_borders = true
+status_indicators = "symbols"
+
+[keys]
+next_workspace = "prefix+n"
+previous_workspace = "prefix+p"
+next_tab = "prefix+shift+n"
+previous_tab = "prefix+shift+p"
+new_workspace = "prefix+c"
+new_tab = "prefix+shift+c"
+
+[[keys.command]]
+key = "prefix+a"
+command = "art"
+type = "popup"
+width = "85%"
+height = "80%"
+description = "Global Artifacts (agy·claude·local)"
+
+[[keys.command]]
+key = "prefix+g"
+command = "lazygit"
+type = "popup"
+width = "92%"
+height = "90%"
+description = "Lazygit Side-by-Side Diff Review"
+
+[[keys.command]]
+key = "prefix+d"
+command = "audit-diff"
+type = "popup"
+width = "95%"
+height = "92%"
+description = "Neovim Diffview Audit"
+
+[[keys.command]]
+key = "prefix+i"
+command = "herdr-nvim-split"
+type = "shell"
+description = "Split 25% left, 75% right and open Neovim"
+
+[ui.toast]
+delivery = "system"

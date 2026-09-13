@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "akatsuki": {
+      "command": "akatsuki",
+      "args": ["mcp"]
+    }
+  }
+}

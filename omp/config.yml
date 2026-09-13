@@ -1,0 +1,63 @@
+providers:
+  webSearchOrder:
+    - perplexity
+    - gemini
+    - anthropic
+    - codex
+    - xai
+    - zai
+    - exa
+    - tinyfish
+    - jina
+    - kagi
+    - tavily
+    - firecrawl
+    - brave
+    - kimi
+    - parallel
+    - synthetic
+    - searxng
+    - startpage
+    - duckduckgo
+    - ecosia
+    - google
+    - mojeek
+    - public
+modelRoles:
+  default: commandcode/deepseek/deepseek-v4.1-flash:high
+symbolPreset: nerd
+composer:
+  shape: box
+theme:
+  dark: dark-gruvbox
+setupVersion: 2
+disabledProviders:
+  - openrouter
+  - hetzner
+  - opencode-zen
+  - anthropic
+  - google
+  - google-antigravity
+  - google-vertex
+extendedContext: false
+statusLine:
+  leftSegments:
+    - pi
+    - model
+    - mode
+    - path
+    - git
+    - pr
+    - context_pct
+    - cache_hit
+    - token_total
+    - cost
+  preset: custom
+  rightSegments:
+    - time
+    - session_name
+astGrep:
+  enabled: true
+github:
+  enabled: true
+hideThinkingBlock: false

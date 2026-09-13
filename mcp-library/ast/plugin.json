@@ -1,0 +1,4 @@
+{
+  "name": "ast",
+  "description": "AST pattern rewriting via ast-grep, LSP diagnostics, and blast-radius analysis"
+}

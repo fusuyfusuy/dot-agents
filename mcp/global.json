@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "akatsuki": {
+      "command": "akatsuki",
+      "args": ["mcp"]
+    },
+    "context-mode": {
+      "command": "context-mode"
+    },
+    "mimori": {
+      "command": "mimori",
+      "args": ["mcp"]
+    }
+  }
+}

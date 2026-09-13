@@ -1,0 +1,3 @@
+interface:
+  display_name: "Boundary Review"
+  short_description: "Boundary-first architectural and seam audit protocol"

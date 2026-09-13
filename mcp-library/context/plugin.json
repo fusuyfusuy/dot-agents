@@ -1,0 +1,4 @@
+{
+  "name": "context",
+  "description": "Compaction resilience and dynamic context memory management via context-mode"
+}

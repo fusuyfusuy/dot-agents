@@ -1,0 +1,4 @@
+{
+  "name": "browser",
+  "description": "Headless browser automation via Playwright MCP"
+}

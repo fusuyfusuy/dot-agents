@@ -1,0 +1,21 @@
+{
+  "allowNonWorkspaceAccess": true,
+  "artifactReviewPolicy": "asks-for-review",
+  "enableTelemetry": false,
+  "useG1Credits": true,
+  "model": "Gemini 3.8 Flash (Medium)",
+  "permissions": {
+    "allow": [
+      "command(*)",
+      "read_file(*)",
+      "write_file(*)",
+      "mcp(*)",
+      "read_url(*)"
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.gemini/antigravity-cli/statusline.sh"
+  },
+  "trustedWorkspaces": []
+}
